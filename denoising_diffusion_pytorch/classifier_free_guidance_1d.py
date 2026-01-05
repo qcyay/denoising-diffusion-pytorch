@@ -14,6 +14,9 @@ from torch.amp import autocast
 from einops import rearrange, reduce, repeat, pack, unpack
 from einops.layers.torch import Rearrange
 
+from accelerate import Accelerator
+from ema_pytorch import EMA
+
 from tqdm.auto import tqdm
 
 # constants
@@ -563,7 +566,7 @@ def cosine_beta_schedule(timesteps, s = 0.008):
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
 
-class GaussianDiffusion(nn.Module):
+class GaussianDiffusion1D(nn.Module):
     """
     负责前向扩散与反向生成的整体流程，包括时间调度、噪声预测目标、采样策略
     （DDPM / DDIM）以及诸多训练技巧，如 SNR reweight、自条件、offset noise 等。
@@ -1031,6 +1034,232 @@ class GaussianDiffusion(nn.Module):
         return self.p_losses(img, t, *args, **kwargs)
 
 # example
+
+# trainer class
+
+class Trainer1D(object):
+    def __init__(
+        self,
+        diffusion_model: GaussianDiffusion1D,
+        dataset: Dataset,
+        *,
+        train_batch_size = 16,
+        gradient_accumulate_every = 1,
+        train_lr = 1e-4,
+        train_num_steps = 1000000,
+        ema_update_every = 10,
+        ema_decay = 0.995,
+        adam_betas = (0.9, 0.99),
+        save_and_sample_every = 1000,
+        num_samples = 25,
+        results_folder = './results',
+        amp = False,
+        mixed_precision_type = 'fp16',
+        split_batches = True,
+        max_grad_norm = 1.
+    ):
+        super().__init__()
+
+        # accelerator
+
+        # --------------------------- 加速器初始化 ---------------------------
+        # Accelerator 负责：
+        #   - 多卡训练（分布式 / 数据并行）
+        #   - 混合精度训练（fp16 / bf16）
+        #   - 自动处理梯度同步、设备迁移等繁琐细节
+        # 加速器负责多卡/混合精度调度
+        self.accelerator = Accelerator(
+            split_batches = split_batches,
+            mixed_precision = mixed_precision_type if amp else 'no'
+        )
+
+        # model
+
+        # 模型引用与通道配置
+        self.model = diffusion_model
+        self.channels = diffusion_model.channels
+
+        # sampling and training hyperparameters
+
+        # 采样与训练超参数
+        # 验证采样图像数量是否有整数平方根（用于网格显示）
+        assert has_int_squareroot(num_samples), 'number of samples must have an integer square root'
+        self.num_samples = num_samples
+        self.save_and_sample_every = save_and_sample_every
+
+        self.batch_size = train_batch_size
+        self.gradient_accumulate_every = gradient_accumulate_every
+        self.max_grad_norm = max_grad_norm
+
+        self.train_num_steps = train_num_steps
+
+        # dataset and dataloader
+
+        # 标准 DataLoader：shuffle 打乱，pin_memory 提升主机到 GPU 的拷贝效率
+        dl = DataLoader(dataset, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
+
+        # 使用accelerator准备数据加载器，使其支持多GPU和混合精度
+        dl = self.accelerator.prepare(dl)
+        # cycle(dl)：将 dataloader 包装成无限生成器，一直循环数据
+        self.dl = cycle(dl)
+
+        # optimizer
+
+        # 优化器
+        # 标准 Adam 优化器，参数来自扩散模型
+        self.opt = Adam(diffusion_model.parameters(), lr = train_lr, betas = adam_betas)
+
+        # for logging results in a folder periodically
+
+        # 定期保存模型 / 采样结果
+        # 只有主进程（rank 0）负责维护 EMA 和保存模型，避免多进程重复写文件
+        if self.accelerator.is_main_process:
+            # 创建指数移动平均模型
+            self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)
+            # 将EMA模型移动到相应设备
+            self.ema.to(self.device)
+
+        # 创建结果保存目录
+        self.results_folder = Path(results_folder)
+        self.results_folder.mkdir(exist_ok = True)
+
+        # step counter state
+
+        # 记录当前训练步数
+        self.step = 0
+
+        # prepare model, dataloader, optimizer with accelerator
+
+        # 使用 accelerator.prepare 适配模型与优化器到正确设备 / 分布式环境
+        # 之后 self.model / self.opt 应该只通过 accelerator 调用
+        self.model, self.opt = self.accelerator.prepare(self.model, self.opt)
+
+    @property
+    def device(self):
+        """快捷获取 accelerator 当前设备。"""
+        return self.accelerator.device
+
+    def save(self, milestone):
+        """在主进程保存检查点，包括模型/EMA/优化器/Scaler。"""
+        if not self.accelerator.is_local_main_process:
+            return
+
+        data = {
+            'step': self.step,
+            'model': self.accelerator.get_state_dict(self.model),
+            'opt': self.opt.state_dict(),
+            'ema': self.ema.state_dict(),
+            'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
+            'version': __version__
+        }
+
+        torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
+
+    def load(self, milestone):
+        """从磁盘加载指定里程碑权重，并恢复优化器与 EMA。"""
+        accelerator = self.accelerator
+        device = accelerator.device
+
+        # 加载 checkpoint，map_location 确保可以在当前设备上加载
+        # weights_only=True 表示只加载权重张量，有助于安全和速度
+        data = torch.load(str(self.results_folder / f'model-{milestone}.pt'), map_location=device, weights_only=True)
+
+        # unwrap_model：从 accelerator 封装中取出原始模型（去掉 DDP / FP16 包装）
+        model = self.accelerator.unwrap_model(self.model)
+        model.load_state_dict(data['model']) # 恢复模型参数
+
+        # 恢复 step 和优化器状态
+        self.step = data['step']
+        self.opt.load_state_dict(data['opt'])
+        # 只在主进程恢复 EMA（EMA 只在主进程真正使用）
+        if self.accelerator.is_main_process:
+            self.ema.load_state_dict(data["ema"])
+
+        # 打印版本信息（若存在）
+        if 'version' in data:
+            print(f"loading from version {data['version']}")
+
+        # 若使用了混合精度，并且保存时也有 scaler，则恢复其状态
+        if exists(self.accelerator.scaler) and exists(data['scaler']):
+            self.accelerator.scaler.load_state_dict(data['scaler'])
+
+    def train(self):
+        """标准训练循环：梯度累积、EMA与定期采样。"""
+        accelerator = self.accelerator
+        device = accelerator.device
+
+        # 使用 tqdm 包装训练进度条
+        # initial=self.step 支持从中途恢复训练
+        with tqdm(initial = self.step, total = self.train_num_steps, disable = not accelerator.is_main_process) as pbar:
+
+            # 主训练循环，直到 step 达到 train_num_steps
+            while self.step < self.train_num_steps:
+                # 切换到训练模式（启用 dropout / BN 统计等）
+                self.model.train()
+
+                total_loss = 0. # 用于统计当前 step 内（含梯度累积）的 loss 和
+
+                # --------------------------- 梯度累积 ---------------------------
+                # 通过在多个 mini-batch 上累积梯度，再统一反向更新一次
+                # 可达到“更大 batch 训练”的效果，而不需要增加显存
+                for _ in range(self.gradient_accumulate_every):
+                    # 从无限循环的 dataloader 中取出一个 batch，并移动到目标 device
+                    data = next(self.dl).to(device)
+
+                    # autocast：在混合精度下，自动推断使用 FP16 / FP32
+                    with self.accelerator.autocast():
+                        # 扩散模型通常将“输入 x -> 返回 loss”
+                        loss = self.model(data)
+                        # 除以累积次数，等价于对多个 batch 的 loss 取平均
+                        loss = loss / self.gradient_accumulate_every
+                        total_loss += loss.item() # 记录到 total_loss 统计值中
+
+                    # 通过 accelerator.backward 统一处理分布式和混合精度的反向传播
+                    self.accelerator.backward(loss)
+
+                # 更新 tqdm 进度条头部显示当前 loss
+                pbar.set_description(f'loss: {total_loss:.4f}')
+
+                # 等待所有进程同步，保证梯度等状态一致
+                accelerator.wait_for_everyone()
+                # 对模型参数做梯度裁剪，避免梯度爆炸
+                accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+
+                # 优化器更新参数 + 清空梯度
+                self.opt.step()
+                self.opt.zero_grad()
+
+                # 再次同步，确保所有进程在同一训练阶段
+                accelerator.wait_for_everyone()
+
+                self.step += 1
+                if accelerator.is_main_process:
+                    # 主进程更新 EMA 权重
+                    self.ema.update()
+
+                    if self.step != 0 and self.step % self.save_and_sample_every == 0:
+                        # 切换 EMA 模型到 eval 模式（关掉 dropout / BN 训练行为）
+                        self.ema.ema_model.eval()
+
+                        with torch.no_grad(): # 关闭梯度，加速推理
+                            # 计算当前是第几个 milestone（从 1 开始）
+                            milestone = self.step // self.save_and_sample_every
+                            # 将 num_samples 拆成若干批（因为单次采样 batch_size 受显存限制）
+                            batches = num_to_groups(self.num_samples, self.batch_size)
+                            # TODO 应该需要加入类别
+                            # 对每个批次调用 EMA 模型的 sample 函数，生成样本，尺寸为[b,c,n]
+                            all_samples_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
+
+                        # 拼接所有生成图片为一个大 tensor：[N, C, N]
+                        all_samples = torch.cat(all_samples_list, dim = 0)
+
+                        # 保存样本
+                        torch.save(all_samples, str(self.results_folder / f'sample-{milestone}.png'))
+                        self.save(milestone)
+
+                pbar.update(1)
+
+        accelerator.print('training complete')
 
 if __name__ == '__main__':
     num_classes = 10
