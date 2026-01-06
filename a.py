@@ -194,5 +194,8 @@ from denoising_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
 # full_attn = (*((False,) * (len(dim_mults) - 1)), True)
 # print(full_attn)
 
-a=torch.linspace(-1, 9, steps = 5)
-print(a)
+trial_name = 'train/BT01/run'
+parts = trial_name.split(os.sep)
+print(parts)
+action_type = parts[1]
+print(action_type)

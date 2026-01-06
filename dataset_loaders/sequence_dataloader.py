@@ -45,7 +45,6 @@ class DiffusionSequenceDataset(Dataset):
             mode: 数据集模式，'train' 或 'test'
             file_suffix: 文件后缀映射字典
             remove_nan: 是否自动检测并移除包含NaN的行
-            enable_action_filter: 是否启用action_patterns筛选
             activity_flag: 是否启用activity_flag掩码功能(默认False)
             min_sequence_length: 最小序列长度,-1表示不限制(默认-1)
         """
@@ -59,7 +58,6 @@ class DiffusionSequenceDataset(Dataset):
         self.device = device
         self.mode = mode.lower()
         self.remove_nan = remove_nan
-        self.enable_action_filter = enable_action_filter
         self.activity_flag = activity_flag
         self.min_sequence_length = min_sequence_length
 
@@ -73,9 +71,6 @@ class DiffusionSequenceDataset(Dataset):
         else:
             self.file_suffix = file_suffix
 
-        # 构建action_pattern到类别索引的映射
-        self.action_to_idx = self._build_action_mapping()
-
         # 获取试验名称列表
         self.trial_names = self._get_trial_names()
 
@@ -83,6 +78,9 @@ class DiffusionSequenceDataset(Dataset):
         self.nan_removal_stats = {
             'trials_with_all_nan_data': 0  # 数据全为NaN的试验数
         }
+
+        ## 测试,正式训练时改行需要注释
+        self.trial_names = self.trial_names[:10]
 
         # 序列长度过滤统计信息
         self.length_filter_stats = {
@@ -95,9 +93,8 @@ class DiffusionSequenceDataset(Dataset):
             'max_length_after': 0
         }
 
-        filter_status = "启用" if self.enable_action_filter else "禁用"
-        print(f"开始加载 {self.mode} 数据集 (扩散模型)...")
-        print(f"找到 {len(self.trial_names)} 个试验 (动作筛选: {filter_status})")
+        print(f"开始加载 {self.mode} 数据集 (用于扩散模型训练)...")
+        print(f"找到 {len(self.trial_names)} 个试验")
         print(f"使用侧别: {', '.join(self.side)}")
         print(f"运动类别数: {len(self.action_patterns)}")
 
@@ -157,54 +154,71 @@ class DiffusionSequenceDataset(Dataset):
 
         return data_seq, class_label
 
-    def _build_action_mapping(self) -> Dict[str, int]:
-        '''构建运动类型名称到类别索引的映射'''
-        action_to_idx = {}
-        for idx, pattern in enumerate(self.action_patterns):
-            action_to_idx[pattern] = idx
-        return action_to_idx
-
     def _get_class_label(self, trial_name: str) -> int:
         '''根据试验名称获取类别标签'''
         # 从trial_name中提取action_type
-        # 格式: participant/action_type/participant_action_type_suffix
+        # 格式: participant/action_type
         parts = trial_name.split(os.sep)
         if len(parts) >= 2:
             action_type = parts[1]  # action_type部分
 
-            # 匹配action_patterns
-            for idx, pattern in enumerate(self.action_patterns):
-                if re.match(pattern, action_type):
-                    return idx
+            # 遍历每个类别（每个类别可能包含多个patterns）
+            for class_idx, patterns in enumerate(self.action_patterns):
+                # 如果patterns是字符串，转换为列表
+                if isinstance(patterns, str):
+                    patterns = [patterns]
+
+                # 检查action_type是否匹配该类别的任何pattern
+                for pattern in patterns:
+                    if re.match(pattern, action_type):
+                        return class_idx
 
         # 如果没有匹配到任何pattern，返回-1表示未知类别
         print(f"警告: 试验 {trial_name} 无法匹配任何运动类型pattern")
         return -1
 
+    def _is_action_matched(self, action_type: str) -> bool:
+        '''检查动作类型是否匹配任何筛选模式'''
+        for patterns in self.action_patterns:
+            # 如果patterns是字符串，转换为列表
+            patterns = [patterns] if isinstance(patterns, str) else patterns
+
+            # 检查是否匹配该类别的任何pattern
+            if any(re.match(pattern, action_type) for pattern in patterns):
+                return True
+
+        return False
+
     def _get_trial_names(self) -> List[str]:
         '''获取所有试验的名称列表'''
+        # data/train
         mode_dir = os.path.join(self.data_dir, self.mode)
+
+        if not os.path.exists(mode_dir):
+            raise FileNotFoundError(f"模式目录不存在: {mode_dir}")
+
         trial_names = []
 
         for participant in os.listdir(mode_dir):
+            # data/train/BT01
             participant_dir = os.path.join(mode_dir, participant)
-            if not os.path.isdir(participant_dir):
-                continue
 
-            for action_type in os.listdir(participant_dir):
-                action_dir = os.path.join(participant_dir, action_type)
-                if not os.path.isdir(action_dir):
-                    continue
+            if os.path.isdir(participant_dir):
 
-                # 如果启用了action_filter，检查是否匹配
-                if self.enable_action_filter:
-                    matched = any(re.match(pattern, action_type) for pattern in self.action_patterns)
-                    if not matched:
+                for action_type in os.listdir(participant_dir):
+                    # data/train/BT01/walk
+                    action_dir = os.path.join(participant_dir, action_type)
+
+                    if not os.path.isdir(action_dir):
                         continue
 
-                # 构建试验的相对路径
-                trial_name = os.path.join(participant, action_type)
-                trial_names.append(trial_name)
+                    # 检查动作类型是否匹配筛选模式
+                    if not self._is_action_matched(action_type):
+                        continue
+
+                    # 构建试验的相对路径, 例如: BT01/walk
+                    trial_name = os.path.join(participant, action_type)
+                    trial_names.append(trial_name)
 
         return sorted(trial_names)
 
@@ -212,17 +226,12 @@ class DiffusionSequenceDataset(Dataset):
         '''预加载所有试验的数据到内存'''
         for trial_name in self.trial_names:
             # 加载数据
-            try:
-                data, class_label = self._load_trial_data(trial_name)
+            data, class_label = self._load_trial_data(trial_name)
 
-                # 存储数据
-                self.all_data.append(data.numpy())
-                self.all_labels.append(class_label)
-                self.trial_lengths.append(data.shape[1])
-
-            except Exception as e:
-                print(f"警告: 加载试验 {trial_name} 失败: {e}")
-                continue
+            # 存储数据
+            self.all_data.append(data.numpy())
+            self.all_labels.append(class_label)
+            self.trial_lengths.append(data.shape[1])
 
     def _load_trial_data(self, trial_name: str) -> Tuple[torch.Tensor, int]:
         '''
@@ -232,7 +241,9 @@ class DiffusionSequenceDataset(Dataset):
             data: [num_features, time_steps] 合并的数据(传感器+力矩)
             class_label: 类别标签
         '''
+        # data/train
         mode_dir = os.path.join(self.data_dir, self.mode)
+        # data/train/BT01/walk
         trial_dir = os.path.join(mode_dir, trial_name)
 
         # 获取类别标签
@@ -243,7 +254,9 @@ class DiffusionSequenceDataset(Dataset):
 
         for s in self.side:
             # 替换特征名中的通配符
+            # ["foot_imu_r_gyro_x", "foot_imu_r_gyro_y",...]
             input_cols = [name.replace("*", s) for name in self.input_names]
+            # ["hip_flexion_r_moment", "knee_angle_r_moment"]
             label_cols = [name.replace("*", s) for name in self.label_names]
 
             # 构建文件路径
@@ -251,21 +264,21 @@ class DiffusionSequenceDataset(Dataset):
             action_type = trial_name.split(os.sep)[1]
             base_filename = f"{participant}_{action_type}"
 
+            # data/train/BT01/walk/BT01_walk_exo.csv
             input_file = os.path.join(trial_dir, base_filename + self.file_suffix["input"])
+            # data/train/BT01/walk/BT01_walk_moment_filt.csv
             label_file = os.path.join(trial_dir, base_filename + self.file_suffix["label"])
 
-            # 加载传感器数据
+            # 加载传感器数据,尺寸为[C,N]
             input_data = self._load_input_data(input_file, input_cols)
 
-            # 加载力矩数据
+            # 加载力矩数据,尺寸为[2,N]
             label_data = self._load_label_data(label_file, label_cols)
 
             # 确保长度一致
-            min_len = min(input_data.shape[1], label_data.shape[1])
-            input_data = input_data[:, :min_len]
-            label_data = label_data[:, :min_len]
+            assert input_data.shape[1] == label_data.shape[1]
 
-            # 合并传感器数据和力矩数据
+            # 合并传感器数据和力矩数据,尺寸为[C+2,N]
             side_data = torch.cat([input_data, label_data], dim=0)
             all_side_data.append(side_data)
 
@@ -421,6 +434,7 @@ class DiffusionSequenceDataset(Dataset):
 
 
 def main():
+    import importlib
     import sys
     sys.path.insert(0, '.')
     import argparse
@@ -438,25 +452,24 @@ def main():
 
     args = parser.parse_args()
 
-    # 导入配置
-    config = __import__(args.config)
+    def load_config(config_path: str):
+        '''Load config file as module.'''
+        config_path = config_path.replace("/", ".").replace("\\", ".")
+        if config_path.endswith(".py"):
+            config_path = config_path[:-3]
+        print(f"Loading config file from {config_path}.")
+        return importlib.import_module(config_path)
 
-    # 替换配置中的通配符
-    if isinstance(config.side, list):
-        # 如果side是列表，不替换通配符（在加载数据时处理）
-        input_names = config.input_names
-        label_names = config.label_names
-    else:
-        input_names = [name.replace("*", config.side) for name in config.input_names]
-        label_names = [name.replace("*", config.side) for name in config.label_names]
+    # 导入配置
+    config = importlib.import_module(args.config)
 
     device = torch.device(args.device)
 
     # 创建数据集
     dataset = DiffusionSequenceDataset(
         data_dir=config.data_dir,
-        input_names=input_names,
-        label_names=label_names,
+        input_names=config.input_names,
+        label_names=config.label_names,
         side=config.side,
         diffusion_sequence_length=config.diffusion_sequence_length,
         action_patterns=config.action_patterns,
@@ -464,7 +477,6 @@ def main():
         device=device,
         mode=args.mode,
         remove_nan=True,
-        enable_action_filter=getattr(config, 'enable_action_filter', False),
         activity_flag=config.activity_flag,
         min_sequence_length=getattr(config, 'min_sequence_length', -1)
     )
@@ -502,6 +514,7 @@ def main():
         print(f"  数据形状: {data.shape}")  # [B, num_features, sequence_length]
         print(f"  标签形状: {labels.shape}")  # [B]
         print(f"  标签值: {labels.tolist()}")
+        breakpoint()
 
         if batch_idx >= 2:
             break

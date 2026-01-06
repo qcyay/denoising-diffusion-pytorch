@@ -15,9 +15,8 @@ data_dir = 'data'
 side = ['l', 'r']
 
 # ==================== Activity Flag 配置 ====================
-# 是否启用activity_flag掩码功能
-# True: 读取activity_flag.csv文件，只在掩码为1的位置计算损失和指标
-# False: 不使用activity_flag，在所有位置计算损失和指标
+# True: 读取activity_flag.csv文件
+# False: 不使用activity_flag.csv文件
 activity_flag = False
 
 # ==================== 扩散模型生成的特征配置 ====================
@@ -46,50 +45,42 @@ label_names = ["hip_flexion_*_moment", "knee_angle_*_moment"]
 min_sequence_length = -1
 
 # 扩散模型的子序列长度（每个样本的时间步数）
-diffusion_sequence_length = 200
+diffusion_sequence_length = 300
 
-# ==================== 运动类型筛选配置 ====================
-
-# 是否启用基于action_patterns的数据筛选
-# True: 只使用action_patterns中指定的运动类型
-# False: 使用所有可用的数据文件（忽略action_patterns）
-enable_action_filter = False
 
 # 运动类型筛选模式（使用正则表达式）
-# 每个正则表达式对应一个类别，类别序号从0开始
-# 用于classifier-free guidance的类别标签
+# 每个元素可以是单个pattern或多个patterns的列表，同一元素内的patterns属于同一类别
+# 总共28个类别（类别索引0-27）
 action_patterns = [
-    r"^normal_walk_.*_(shuffle|0-6|1-2|1-8).*",  # 类别0: Level ground walk
-    r"^poses_.*",  # 类别1: Standing poses
-    r"^dynamic_walk_.*(high-knees|butt-kicks).*", # 类别2: Calisthenics part 1
-    r"^normal_walk_.*skip.*", # 类别3: Calisthenics part 2
-    r"^tire_run_.*",  # 类别4: Calisthenics part 3
-    r"^push_.*",  # 类别5: Push and pull recovery
-    r"^jump_.*_(hop|vertical|180|90-f|90-s).*",  # 类别6: Jump in place
-    r"^turn_and_step_.*",  # 类别7: Turns
-    r"^cutting_.*",  # 类别8: Cut
-    r"^sit_to_stand_.*",  # 类别9: Sit and stand
-    r"^walk_backward_.*",  # 类别10: Backwards walk
-    r"^weighted_walk_.*",  # 类别11: 25 lb Loaded walk
-    r"^lift_weight_.*",  # 类别12: Lift and place weight
-    r"^tug_of_war_.*",  # 类别13: Tug of war
-    r"^jump_.*_(fb|lateral).*", # 类别14: Jump across part 1
-    r"^side_shuffle_.*",  # 类别15: Jump across part 2
-    r"^normal_walk_.*_(2-0|2-5).*",  # 类别16: Run
-    r"^dynamic_walk_.*(toe-walk|heel-walk).*",  # 类别17: Toe and heel walk
-    r"^twister_.*",  # 类别18: Twister
-    r"^meander_.*",  # 类别19: Meander
-    r"^incline_walk_.*up.*",  # 类别20: Inclined walk
-    r"^stairs_.*down.*",  # 类别21: Stair descent
-    r"^lunges_.*",  # 类别22: Lunge
-    r"^stairs_.*up.*",  # 类别23: Stair ascent
-    r"^incline_walk_.*down.*",  # 类别24: Declined walk
-    r"^start_stop_.*",  # 类别25: Start and stop
-    r"^ball_toss_.*",  # 类别26: Medicine ball toss
-    r"^obstacle_walk_.*",  # 类别27: Step over
-    r"^squats_.*",  # 类别28: Squat
-    r"^curb_.*",  # 类别29: Curb
-    r"^step_ups_.*",  # 类别30: Step up
+    # === 按论文中重要性排序的动作筛选 ===
+    [r"^normal_walk_.*_(shuffle|0-6|1-2|1-8).*"],  # 类别0: Level ground walk
+    [r"^poses_.*"],  # 类别1: Standing poses
+    [r"^dynamic_walk_.*(high-knees|butt-kicks).*", r"^normal_walk_.*skip.*", r"^tire_run_.*"],  # 类别2: Calisthenics
+    [r"^push_.*"],  # 类别3: Push and pull recovery
+    [r"^jump_.*_(hop|vertical|180|90-f|90-s).*"],  # 类别4: Jump in place
+    [r"^turn_and_step_.*"],  # 类别5: Turns
+    [r"^cutting_.*"],  # 类别6: Cut
+    [r"^sit_to_stand_.*"],  # 类别7: Sit and stand
+    [r"^walk_backward_.*"],  # 类别8: Backwards walk
+    [r"^weighted_walk_.*"],  # 类别9: 25 lb Loaded walk
+    [r"^lift_weight_.*"],  # 类别10: Lift and place weight
+    [r"^tug_of_war_.*"],  # 类别11: Tug of war
+    [r"^jump_.*_(fb|lateral).*", r"^side_shuffle_.*"],  # 类别12: Jump across
+    [r"^normal_walk_.*_(2-0|2-5).*"],  # 类别13: Run
+    [r"^dynamic_walk_.*(toe-walk|heel-walk).*"],  # 类别14: Toe and heel walk
+    [r"^twister_.*"],  # 类别15: Twister
+    [r"^meander_.*"],  # 类别16: Meander
+    [r"^incline_walk_.*up.*"],  # 类别17: Inclined walk
+    [r"^stairs_.*down.*"],  # 类别18: Stair descent
+    [r"^lunges_.*"],  # 类别19: Lunge
+    [r"^stairs_.*up.*"],  # 类别20: Stair ascent
+    [r"^incline_walk_.*down.*"],  # 类别21: Declined walk
+    [r"^start_stop_.*"],  # 类别22: Start and stop
+    [r"^ball_toss_.*"],  # 类别23: Medicine ball toss
+    [r"^obstacle_walk_.*"],  # 类别24: Step over
+    [r"^squats_.*"],  # 类别25: Squat
+    [r"^curb_.*"],  # 类别26: Curb
+    [r"^step_ups_.*"],  # 类别27: Step up
 ]
 
 # 参与者体重字典(单位:kg)
