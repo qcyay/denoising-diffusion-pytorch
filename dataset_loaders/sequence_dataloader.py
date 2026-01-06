@@ -12,6 +12,8 @@ class DiffusionSequenceDataset(Dataset):
     扩散模型专用序列数据集
     - 支持单侧或双侧数据加载
     - 合并传感器数据和力矩数据
+    - 支持activity_flag掩码
+    - 支持参与者体重特征
     - 返回运动类型的类别标签
     '''
 
@@ -24,11 +26,12 @@ class DiffusionSequenceDataset(Dataset):
                  action_patterns: List[str],
                  participant_masses: Dict[str, float] = {},
                  device: torch.device = torch.device("cpu"),
-                 mode: str = "train",
+                 mode: Union[str, List[str]] = "train",
                  file_suffix: Dict[str, str] = None,
-                 remove_nan: bool = True,
-                 enable_action_filter: bool = False,
+                 remove_nan: bool = False,
+                 remove_any_nan: bool = True,
                  activity_flag: bool = False,
+                 use_participant_mass: bool = False,
                  min_sequence_length: int = -1):
         """
         初始化扩散模型序列数据集
@@ -42,10 +45,12 @@ class DiffusionSequenceDataset(Dataset):
             action_patterns: 运动类型筛选的正则表达式列表
             participant_masses: 参与者体重字典
             device: 计算设备
-            mode: 数据集模式，'train' 或 'test'
+            mode: 数据集模式，'train'、'test' 或 ['train', 'test']
             file_suffix: 文件后缀映射字典
-            remove_nan: 是否自动检测并移除包含NaN的行
+            remove_nan: 是否移除数据全为NaN的序列
+            remove_any_nan: 是否移除包含任何NaN的序列
             activity_flag: 是否启用activity_flag掩码功能(默认False)
+            use_participant_mass: 是否使用参与者体重作为特征(默认False)
             min_sequence_length: 最小序列长度,-1表示不限制(默认-1)
         """
         self.data_dir = data_dir
@@ -56,9 +61,11 @@ class DiffusionSequenceDataset(Dataset):
         self.action_patterns = action_patterns
         self.participant_masses = participant_masses
         self.device = device
-        self.mode = mode.lower()
+        self.mode = [mode] if isinstance(mode, str) else mode
         self.remove_nan = remove_nan
+        self.remove_any_nan = remove_any_nan
         self.activity_flag = activity_flag
+        self.use_participant_mass = use_participant_mass
         self.min_sequence_length = min_sequence_length
 
         # 设置文件后缀映射
@@ -71,15 +78,19 @@ class DiffusionSequenceDataset(Dataset):
         else:
             self.file_suffix = file_suffix
 
+        # 维护特征拼接列表
+        self.feature_sources = []
+
         # 获取试验名称列表
         self.trial_names = self._get_trial_names()
 
         # 统计信息
         self.nan_removal_stats = {
-            'trials_with_all_nan_data': 0  # 数据全为NaN的试验数
+            'trials_with_all_nan_data': 0,  # 数据全为NaN的试验数
+            'trials_with_any_nan_data': 0  # 包含任何NaN的试验数
         }
 
-        ## 测试,正式训练时改行需要注释
+        # 测试,正式训练时改行需要注释
         self.trial_names = self.trial_names[:10]
 
         # 序列长度过滤统计信息
@@ -93,13 +104,13 @@ class DiffusionSequenceDataset(Dataset):
             'max_length_after': 0
         }
 
-        print(f"开始加载 {self.mode} 数据集 (用于扩散模型训练)...")
+        print(f"开始加载 {'/'.join(self.mode)} 数据集 (用于扩散模型训练)...")
         print(f"找到 {len(self.trial_names)} 个试验")
         print(f"使用侧别: {', '.join(self.side)}")
         print(f"运动类别数: {len(self.action_patterns)}")
 
         # 预加载所有数据到内存
-        self.all_data = []  # 存储所有试验的合并数据(传感器+力矩)
+        self.all_data = []  # 存储所有试验的合并数据(传感器+力矩+其他特征)
         self.all_labels = []  # 存储所有试验的类别标签
         self.trial_lengths = []  # 存储每个试验的原始长度
         self._preload_all_data()
@@ -109,21 +120,30 @@ class DiffusionSequenceDataset(Dataset):
             self._filter_by_sequence_length()
 
         # 检测并移除数据全为NaN的序列
-        self._remove_invalid_sequences()
+        if self.remove_nan:
+            self._remove_all_nan_sequences()
+
+        # 检测并移除包含任何NaN的序列
+        if self.remove_any_nan:
+            self._remove_sequences_with_nan()
 
         # 生成序列索引
         print(f"生成序列索引...")
         self.sequences = self._generate_sequences()
 
-        print(f"数据集初始化完成 - 模式: {self.mode}, "
+        print(f"数据集初始化完成 - 模式: {'/'.join(self.mode)}, "
               f"试验数量: {len(self.trial_names)}, "
               f"序列数量: {len(self.sequences)}")
+
+        # 打印特征拼接信息
+        self._print_feature_sources()
 
         # 打印序列长度过滤统计
         if self.min_sequence_length > 0:
             self.print_length_filter_summary()
 
-        if self.remove_nan and self.nan_removal_stats['trials_with_all_nan_data'] > 0:
+        # 打印NaN移除统计
+        if self.remove_nan or self.remove_any_nan:
             self.print_nan_removal_summary()
 
     def __len__(self):
@@ -157,21 +177,22 @@ class DiffusionSequenceDataset(Dataset):
     def _get_class_label(self, trial_name: str) -> int:
         '''根据试验名称获取类别标签'''
         # 从trial_name中提取action_type
-        # 格式: participant/action_type
+        # 格式: participant/action_type 或 mode/participant/action_type
         parts = trial_name.split(os.sep)
-        if len(parts) >= 2:
-            action_type = parts[1]  # action_type部分
 
-            # 遍历每个类别（每个类别可能包含多个patterns）
-            for class_idx, patterns in enumerate(self.action_patterns):
-                # 如果patterns是字符串，转换为列表
-                if isinstance(patterns, str):
-                    patterns = [patterns]
+        # 找到action_type (最后一个部分)
+        action_type = parts[-1]
 
-                # 检查action_type是否匹配该类别的任何pattern
-                for pattern in patterns:
-                    if re.match(pattern, action_type):
-                        return class_idx
+        # 遍历每个类别（每个类别可能包含多个patterns）
+        for class_idx, patterns in enumerate(self.action_patterns):
+            # 如果patterns是字符串，转换为列表
+            if isinstance(patterns, str):
+                patterns = [patterns]
+
+            # 检查action_type是否匹配该类别的任何pattern
+            for pattern in patterns:
+                if re.match(pattern, action_type):
+                    return class_idx
 
         # 如果没有匹配到任何pattern，返回-1表示未知类别
         print(f"警告: 试验 {trial_name} 无法匹配任何运动类型pattern")
@@ -191,19 +212,23 @@ class DiffusionSequenceDataset(Dataset):
 
     def _get_trial_names(self) -> List[str]:
         '''获取所有试验的名称列表'''
-        # data/train
-        mode_dir = os.path.join(self.data_dir, self.mode)
-
-        if not os.path.exists(mode_dir):
-            raise FileNotFoundError(f"模式目录不存在: {mode_dir}")
-
         trial_names = []
 
-        for participant in os.listdir(mode_dir):
-            # data/train/BT01
-            participant_dir = os.path.join(mode_dir, participant)
+        # 遍历所有模式（train和/或test）
+        for mode in self.mode:
+            # data/train
+            mode_dir = os.path.join(self.data_dir, mode)
 
-            if os.path.isdir(participant_dir):
+            if not os.path.exists(mode_dir):
+                print(f"警告: 模式目录不存在: {mode_dir}")
+                continue
+
+            for participant in os.listdir(mode_dir):
+                # data/train/BT01
+                participant_dir = os.path.join(mode_dir, participant)
+
+                if not os.path.isdir(participant_dir):
+                    continue
 
                 for action_type in os.listdir(participant_dir):
                     # data/train/BT01/walk
@@ -216,8 +241,12 @@ class DiffusionSequenceDataset(Dataset):
                     if not self._is_action_matched(action_type):
                         continue
 
-                    # 构建试验的相对路径, 例如: BT01/walk
-                    trial_name = os.path.join(participant, action_type)
+                    # 构建试验的相对路径, 例如: train/BT01/walk 或 BT01/walk
+                    # 包含mode以区分来自不同数据集的同名试验
+                    if len(self.mode) > 1:
+                        trial_name = os.path.join(mode, participant, action_type)
+                    else:
+                        trial_name = os.path.join(participant, action_type)
                     trial_names.append(trial_name)
 
         return sorted(trial_names)
@@ -225,70 +254,72 @@ class DiffusionSequenceDataset(Dataset):
     def _preload_all_data(self):
         '''预加载所有试验的数据到内存'''
         for trial_name in self.trial_names:
-            # 加载数据
-            data, class_label = self._load_trial_data(trial_name)
+            # 解析trial_name
+            parts = trial_name.split(os.sep)
+            if len(self.mode) > 1:
+                # 格式: mode/participant/action_type
+                mode, participant, action_type = parts[0], parts[1], parts[2]
+            else:
+                # 格式: participant/action_type
+                mode = self.mode[0]
+                participant, action_type = parts[0], parts[1]
 
-            # 存储数据
-            self.all_data.append(data.numpy())
+            # 构建文件路径前缀
+            # data/train/BT01/walk/BT01_walk
+            file_prefix = os.path.join(self.data_dir, mode, participant,
+                                       action_type, f"{participant}_{action_type}")
+
+            # 输入文件路径
+            input_file = file_prefix + self.file_suffix["input"]
+            label_file = file_prefix + self.file_suffix["label"]
+
+            # 初始化数据列表（用于拼接多个侧别的数据）
+            all_sides_data = []
+
+            # 遍历每个侧别
+            for s in self.side:
+                # 替换列名中的 * 为具体的侧别
+                input_cols = [name.replace("*", s) for name in self.input_names]
+                label_cols = [name.replace("*", s) for name in self.label_names]
+
+                # 加载输入数据
+                input_data = self._load_input_data(input_file, input_cols)
+
+                # 加载标签数据（力矩数据）
+                label_data = self._load_label_data(label_file, label_cols)
+
+                # 合并输入和标签数据
+                # 形状: [num_features, seq_len]
+                merged_data = torch.cat([input_data, label_data], dim=0)
+
+                # 加载activity_flag数据（如果启用）
+                if self.activity_flag:
+                    flag_file = file_prefix + self.file_suffix["flag"]
+                    flag_data = self._load_activity_flag_data(flag_file, s)
+                    merged_data = torch.cat([merged_data, flag_data], dim=0)
+
+                # 添加参与者体重特征（如果启用）
+                if self.use_participant_mass:
+                    mass_data = self._create_mass_feature(participant, merged_data.shape[1])
+                    merged_data = torch.cat([merged_data, mass_data], dim=0)
+
+                all_sides_data.append(merged_data)
+
+            # 如果有多个侧别，沿特征维度拼接
+            if len(all_sides_data) > 1:
+                combined_data = torch.cat(all_sides_data, dim=0)
+            else:
+                combined_data = all_sides_data[0]
+
+            # 转换为numpy并存储
+            self.all_data.append(combined_data.numpy())
+
+            # 存储类别标签
+            class_label = self._get_class_label(trial_name)
             self.all_labels.append(class_label)
-            self.trial_lengths.append(data.shape[1])
 
-    def _load_trial_data(self, trial_name: str) -> Tuple[torch.Tensor, int]:
-        '''
-        加载单个试验的数据
-
-        返回:
-            data: [num_features, time_steps] 合并的数据(传感器+力矩)
-            class_label: 类别标签
-        '''
-        # data/train
-        mode_dir = os.path.join(self.data_dir, self.mode)
-        # data/train/BT01/walk
-        trial_dir = os.path.join(mode_dir, trial_name)
-
-        # 获取类别标签
-        class_label = self._get_class_label(trial_name)
-
-        # 为每个侧别加载数据并合并
-        all_side_data = []
-
-        for s in self.side:
-            # 替换特征名中的通配符
-            # ["foot_imu_r_gyro_x", "foot_imu_r_gyro_y",...]
-            input_cols = [name.replace("*", s) for name in self.input_names]
-            # ["hip_flexion_r_moment", "knee_angle_r_moment"]
-            label_cols = [name.replace("*", s) for name in self.label_names]
-
-            # 构建文件路径
-            participant = trial_name.split(os.sep)[0]
-            action_type = trial_name.split(os.sep)[1]
-            base_filename = f"{participant}_{action_type}"
-
-            # data/train/BT01/walk/BT01_walk_exo.csv
-            input_file = os.path.join(trial_dir, base_filename + self.file_suffix["input"])
-            # data/train/BT01/walk/BT01_walk_moment_filt.csv
-            label_file = os.path.join(trial_dir, base_filename + self.file_suffix["label"])
-
-            # 加载传感器数据,尺寸为[C,N]
-            input_data = self._load_input_data(input_file, input_cols)
-
-            # 加载力矩数据,尺寸为[2,N]
-            label_data = self._load_label_data(label_file, label_cols)
-
-            # 确保长度一致
-            assert input_data.shape[1] == label_data.shape[1]
-
-            # 合并传感器数据和力矩数据,尺寸为[C+2,N]
-            side_data = torch.cat([input_data, label_data], dim=0)
-            all_side_data.append(side_data)
-
-        # 如果有多个侧别，沿特征维度拼接
-        if len(all_side_data) > 1:
-            data = torch.cat(all_side_data, dim=0)
-        else:
-            data = all_side_data[0]
-
-        return data, class_label
+            # 存储序列长度
+            self.trial_lengths.append(combined_data.shape[1])
 
     def _load_input_data(self, file_path: str, column_names: List[str]) -> torch.Tensor:
         '''加载输入数据（传感器数据）'''
@@ -319,6 +350,54 @@ class DiffusionSequenceDataset(Dataset):
         label_data = torch.tensor(extracted_data, dtype=torch.float32).transpose(0, 1)
 
         return label_data
+
+    def _load_activity_flag_data(self, file_path: str, side: str) -> torch.Tensor:
+        '''
+        加载activity_flag数据
+
+        参数:
+            file_path: activity_flag文件路径
+            side: 'l' 或 'r'
+
+        返回:
+            形状为 [1, seq_len] 的tensor
+        '''
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Activity flag文件不存在: {file_path}")
+
+        df = pd.read_csv(file_path)
+
+        # 根据side选择对应的列
+        column_name = 'left' if side == 'l' else 'right'
+
+        if column_name not in df.columns:
+            raise ValueError(f"Activity flag文件缺失必需的列: {column_name}")
+
+        # 提取数据并转换为tensor
+        # 形状: [1, seq_len]
+        flag_data = torch.tensor(df[column_name].values, dtype=torch.float32).unsqueeze(0)
+
+        return flag_data
+
+    def _create_mass_feature(self, participant: str, seq_len: int) -> torch.Tensor:
+        '''
+        创建参与者体重特征
+
+        参数:
+            participant: 参与者ID
+            seq_len: 序列长度
+
+        返回:
+            形状为 [1, seq_len] 的tensor，所有时间步的值都是该参与者的体重
+        '''
+        if participant not in self.participant_masses:
+            raise ValueError(f"参与者 {participant} 的体重信息未找到")
+
+        mass = self.participant_masses[participant]
+        # 创建一个重复的体重特征
+        mass_feature = torch.full((1, seq_len), mass, dtype=torch.float32)
+
+        return mass_feature
 
     def _generate_sequences(self) -> List[Tuple[int, int]]:
         '''
@@ -375,11 +454,8 @@ class DiffusionSequenceDataset(Dataset):
             self.length_filter_stats['min_length_after'] = min(self.trial_lengths)
             self.length_filter_stats['max_length_after'] = max(self.trial_lengths)
 
-    def _remove_invalid_sequences(self):
+    def _remove_all_nan_sequences(self):
         """检测并移除数据全为NaN的序列"""
-        if not self.remove_nan:
-            return
-
         valid_indices = []
         for i in range(len(self.all_data)):
             data = self.all_data[i]
@@ -396,11 +472,68 @@ class DiffusionSequenceDataset(Dataset):
         self.trial_lengths = [self.trial_lengths[i] for i in valid_indices]
         self.trial_names = [self.trial_names[i] for i in valid_indices]
 
+    def _remove_sequences_with_nan(self):
+        """检测并移除包含任何NaN的序列"""
+        valid_indices = []
+        for i in range(len(self.all_data)):
+            data = self.all_data[i]
+            # 检查是否包含NaN
+            if not np.any(np.isnan(data)):
+                valid_indices.append(i)
+            else:
+                print(f"移除包含NaN的试验: {self.trial_names[i]}")
+                self.nan_removal_stats['trials_with_any_nan_data'] += 1
+
+        # 过滤数据
+        self.all_data = [self.all_data[i] for i in valid_indices]
+        self.all_labels = [self.all_labels[i] for i in valid_indices]
+        self.trial_lengths = [self.trial_lengths[i] for i in valid_indices]
+        self.trial_names = [self.trial_names[i] for i in valid_indices]
+
+    def _print_feature_sources(self):
+        """打印特征拼接信息"""
+        # 构建特征源列表
+        self.feature_sources = []
+
+        for s in self.side:
+            # 输入特征
+            self.feature_sources.append(f"传感器数据 (side={s}): {len(self.input_names)} features")
+
+            # 力矩特征
+            self.feature_sources.append(f"力矩数据 (side={s}): {len(self.label_names)} features")
+
+            # Activity flag
+            if self.activity_flag:
+                self.feature_sources.append(f"Activity flag (side={s}): 1 feature")
+
+            # 参与者体重
+            if self.use_participant_mass:
+                self.feature_sources.append(f"参与者体重 (side={s}): 1 feature")
+
+        # 打印信息
+        print(f"\n{'=' * 60}")
+        print(f"特征拼接信息")
+        print(f"{'=' * 60}")
+        for i, source in enumerate(self.feature_sources, 1):
+            print(f"{i}. {source}")
+
+        # 计算总特征数
+        total_features = 0
+        for s in self.side:
+            total_features += len(self.input_names) + len(self.label_names)
+            if self.activity_flag:
+                total_features += 1
+            if self.use_participant_mass:
+                total_features += 1
+
+        print(f"\n总特征数: {total_features}")
+        print(f"{'=' * 60}\n")
+
     def print_length_filter_summary(self):
         """打印序列长度过滤统计摘要"""
         stats = self.length_filter_stats
         print(f"\n{'=' * 60}")
-        print(f"序列长度过滤统计摘要 - {self.mode.upper()} 数据集")
+        print(f"序列长度过滤统计摘要 - {'/'.join(self.mode).upper()} 数据集")
         print(f"{'=' * 60}")
         print(f"最小序列长度阈值: {self.min_sequence_length}")
         print(f"过滤前试验数量: {stats['trials_before_filter']}")
@@ -423,9 +556,12 @@ class DiffusionSequenceDataset(Dataset):
         """打印NaN移除统计摘要"""
         stats = self.nan_removal_stats
         print(f"\n{'=' * 60}")
-        print(f"NaN移除统计摘要 - {self.mode.upper()} 数据集")
+        print(f"NaN移除统计摘要 - {'/'.join(self.mode).upper()} 数据集")
         print(f"{'=' * 60}")
-        print(f"数据全为NaN的试验数: {stats['trials_with_all_nan_data']}")
+        if self.remove_nan:
+            print(f"数据全为NaN的试验数: {stats['trials_with_all_nan_data']}")
+        if self.remove_any_nan:
+            print(f"包含NaN的试验数: {stats['trials_with_any_nan_data']}")
         print(f"{'=' * 60}\n")
 
     def get_num_classes(self) -> int:
@@ -443,10 +579,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="快速测试 DiffusionSequenceDataset 数据加载流程"
     )
-    parser.add_argument("--config", type=str, default="diffusion_config",
+    parser.add_argument("--config", type=str, default="default_config",
                         help="配置文件模块名")
-    parser.add_argument("--mode", choices=["train", "test"], default="train",
-                        help="选择加载训练集或测试集")
+    parser.add_argument("--mode", type=str, default="train",
+                        help="选择加载的模式，如 'train', 'test', 或 'train,test'")
     parser.add_argument("--device", type=str, default="cpu",
                         help="设备，如 cpu 或 cuda:0")
 
@@ -465,6 +601,9 @@ def main():
 
     device = torch.device(args.device)
 
+    # 解析mode参数
+    mode = args.mode.split(',') if ',' in args.mode else args.mode
+
     # 创建数据集
     dataset = DiffusionSequenceDataset(
         data_dir=config.data_dir,
@@ -475,9 +614,11 @@ def main():
         action_patterns=config.action_patterns,
         participant_masses=config.participant_masses,
         device=device,
-        mode=args.mode,
-        remove_nan=True,
+        mode=mode,
+        remove_nan=False,
+        remove_any_nan=True,
         activity_flag=config.activity_flag,
+        use_participant_mass=getattr(config, 'use_participant_mass', False),
         min_sequence_length=getattr(config, 'min_sequence_length', -1)
     )
 
@@ -487,17 +628,11 @@ def main():
     print("\n" + "=" * 70)
     print("扩散模型数据集测试概览")
     print("=" * 70)
-    print(f"模式: {args.mode}")
+    print(f"模式: {mode if isinstance(mode, str) else '/'.join(mode)}")
     print(f"试验数量: {len(dataset.trial_names)}")
     print(f"序列数量: {dataset_size}")
     print(f"类别数量: {num_classes}")
     print(f"序列长度: {config.diffusion_sequence_length}")
-
-    # 计算总特征数
-    total_features = 0
-    for s in (config.side if isinstance(config.side, list) else [config.side]):
-        total_features += len(config.input_names) + len(config.label_names)
-    print(f"总特征数: {total_features}")
 
     if dataset.trial_lengths:
         print(f"序列长度统计 (帧) -> 平均 {np.mean(dataset.trial_lengths):.1f}, "
@@ -514,6 +649,8 @@ def main():
         print(f"  数据形状: {data.shape}")  # [B, num_features, sequence_length]
         print(f"  标签形状: {labels.shape}")  # [B]
         print(f"  标签值: {labels.tolist()}")
+        print(f"  数据统计: min={data.min():.4f}, max={data.max():.4f}, "
+              f"mean={data.mean():.4f}, std={data.std():.4f}")
         breakpoint()
 
         if batch_idx >= 2:
