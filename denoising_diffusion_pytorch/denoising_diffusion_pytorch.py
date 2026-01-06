@@ -629,7 +629,7 @@ class Unet(Module):
         # 拼接最早的高分辨率表示 r，帮助恢复低层语义，尺寸为[b, init_dim * 2, h, w]
         x = torch.cat((x, r), dim = 1)
 
-        # # 最终残差块和卷积输出，尺寸为[b, init_dim, h, w]
+        # 最终残差块和卷积输出，尺寸为[b, init_dim, h, w]
         x = self.final_res_block(x, t)
         return self.final_conv(x)
 

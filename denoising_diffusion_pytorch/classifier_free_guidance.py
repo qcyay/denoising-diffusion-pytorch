@@ -756,7 +756,7 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def model_predictions(self, x, t, classes, cond_scale = 6., rescaled_phi = 0.7, clip_x_start = False):
-        # model_output,条件引导后的模型输出,尺寸为[b,c,h,w],model_output_null,无条件情况下得到的模型输出,尺寸为[b,c,h,w]
+        # model_output,条件引导后的模型输出,尺寸为[b,c,n],model_output_null,无条件情况下得到的模型输出,尺寸为[b,c,n]
         model_output, model_output_null = self.model.forward_with_cond_scale(x, t, classes, cond_scale = cond_scale, rescaled_phi = rescaled_phi)
         # 定义裁剪函数
         maybe_clip = partial(torch.clamp, min = -1., max = 1.) if clip_x_start else identity
