@@ -62,7 +62,6 @@ min_sequence_length = -1
 # 扩散模型的子序列长度（每个样本的时间步数）
 diffusion_sequence_length = 300
 
-
 # 运动类型筛选模式（使用正则表达式）
 # 每个元素可以是单个pattern或多个patterns的列表，同一元素内的patterns属于同一类别
 # 总共28个类别（类别索引0-27）

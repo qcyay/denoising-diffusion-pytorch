@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 import numpy as np
-
+from tqdm import tqdm
 
 class DiffusionSequenceDataset(Dataset):
     '''
@@ -91,7 +91,7 @@ class DiffusionSequenceDataset(Dataset):
         }
 
         # 测试,正式训练时改行需要注释
-        self.trial_names = self.trial_names[:10]
+        self.trial_names = self.trial_names[:100]
 
         # 序列长度过滤统计信息
         self.length_filter_stats = {
@@ -216,7 +216,6 @@ class DiffusionSequenceDataset(Dataset):
 
         # 遍历所有模式（train和/或test）
         for mode in self.mode:
-            # data/train
             mode_dir = os.path.join(self.data_dir, mode)
 
             if not os.path.exists(mode_dir):
@@ -224,14 +223,12 @@ class DiffusionSequenceDataset(Dataset):
                 continue
 
             for participant in os.listdir(mode_dir):
-                # data/train/BT01
                 participant_dir = os.path.join(mode_dir, participant)
 
                 if not os.path.isdir(participant_dir):
                     continue
 
                 for action_type in os.listdir(participant_dir):
-                    # data/train/BT01/walk
                     action_dir = os.path.join(participant_dir, action_type)
 
                     if not os.path.isdir(action_dir):
@@ -253,7 +250,10 @@ class DiffusionSequenceDataset(Dataset):
 
     def _preload_all_data(self):
         '''预加载所有试验的数据到内存'''
-        for trial_name in self.trial_names:
+        for trial_idx, trial_name in enumerate(self.trial_names):
+            if (trial_idx + 1) % 10 == 0 or (trial_idx + 1) == len(self.trial_names):
+                print(f"  加载进度: {trial_idx + 1}/{len(self.trial_names)}")
+
             # 解析trial_name
             parts = trial_name.split(os.sep)
             if len(self.mode) > 1:
@@ -265,7 +265,6 @@ class DiffusionSequenceDataset(Dataset):
                 participant, action_type = parts[0], parts[1]
 
             # 构建文件路径前缀
-            # data/train/BT01/walk/BT01_walk
             file_prefix = os.path.join(self.data_dir, mode, participant,
                                        action_type, f"{participant}_{action_type}")
 
@@ -298,11 +297,6 @@ class DiffusionSequenceDataset(Dataset):
                     flag_data = self._load_activity_flag_data(flag_file, s)
                     merged_data = torch.cat([merged_data, flag_data], dim=0)
 
-                # 添加参与者体重特征（如果启用）
-                if self.use_participant_mass:
-                    mass_data = self._create_mass_feature(participant, merged_data.shape[1])
-                    merged_data = torch.cat([merged_data, mass_data], dim=0)
-
                 all_sides_data.append(merged_data)
 
             # 如果有多个侧别，沿特征维度拼接
@@ -310,6 +304,12 @@ class DiffusionSequenceDataset(Dataset):
                 combined_data = torch.cat(all_sides_data, dim=0)
             else:
                 combined_data = all_sides_data[0]
+
+            # 添加参与者体重特征（如果启用）
+            # 体重对于某个固定序列是一定的，因此只添加一次
+            if self.use_participant_mass:
+                mass_data = self._create_mass_feature(participant, combined_data.shape[1])
+                combined_data = torch.cat([combined_data, mass_data], dim=0)
 
             # 转换为numpy并存储
             self.all_data.append(combined_data.numpy())
@@ -506,9 +506,9 @@ class DiffusionSequenceDataset(Dataset):
             if self.activity_flag:
                 self.feature_sources.append(f"Activity flag (side={s}): 1 feature")
 
-            # 参与者体重
-            if self.use_participant_mass:
-                self.feature_sources.append(f"参与者体重 (side={s}): 1 feature")
+        # 参与者体重（只添加一次，不依赖于side）
+        if self.use_participant_mass:
+            self.feature_sources.append(f"参与者体重: 1 feature")
 
         # 打印信息
         print(f"\n{'=' * 60}")
@@ -523,8 +523,9 @@ class DiffusionSequenceDataset(Dataset):
             total_features += len(self.input_names) + len(self.label_names)
             if self.activity_flag:
                 total_features += 1
-            if self.use_participant_mass:
-                total_features += 1
+        # 参与者体重只计算一次
+        if self.use_participant_mass:
+            total_features += 1
 
         print(f"\n总特征数: {total_features}")
         print(f"{'=' * 60}\n")
@@ -568,6 +569,173 @@ class DiffusionSequenceDataset(Dataset):
         """返回类别数量"""
         return len(self.action_patterns)
 
+    def _get_feature_names(self) -> List[str]:
+        """
+        获取所有特征的名称列表（与数据维度对应）
+
+        返回:
+            特征名称列表，顺序与数据的维度顺序一致
+        """
+        feature_names = []
+
+        for s in self.side:
+            # 输入特征名称
+            for name in self.input_names:
+                feature_names.append(name.replace("*", s))
+
+            # 力矩特征名称
+            for name in self.label_names:
+                feature_names.append(name.replace("*", s))
+
+        # 参与者体重（只添加一次，不依赖于side）
+        if self.use_participant_mass:
+            feature_names.append("participant_mass")
+
+        return feature_names
+
+    def compute_and_save_statistics(self, output_dir: str = "statistics"):
+        """
+        计算并保存每个运动类别的特征统计信息（最大值和最小值）
+
+        参数:
+            output_dir: 统计信息保存目录
+
+        保存格式:
+        {
+            "class_0": {
+                "feature_name_1": {"max": xxx, "min": xxx},
+                "feature_name_2": {"max": xxx, "min": xxx},
+                ...
+            },
+            ...
+            "participant_mass": {"max": xxx, "min": xxx}
+        }
+        """
+        import json
+
+        print(f"\n{'=' * 60}")
+        print(f"开始计算特征统计信息...")
+        print(f"{'=' * 60}")
+
+        # 创建输出目录
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 获取特征名称列表
+        feature_names = self._get_feature_names()
+        num_features = len(feature_names)
+
+        # 初始化统计字典：每个类别存储每个特征的最大值和最小值
+        # {class_idx: {feature_name: {"max": [], "min": []}}}
+        class_stats = {}
+        for class_idx in range(len(self.action_patterns)):
+            class_stats[class_idx] = {}
+            for feat_name in feature_names:
+                class_stats[class_idx][feat_name] = {
+                    "max": float('-inf'),
+                    "min": float('inf')
+                }
+
+        # 参与者体重统计（如果启用）
+        mass_stats = None
+        if self.use_participant_mass:
+            mass_stats = {
+                "max": float('-inf'),
+                "min": float('inf')
+            }
+
+        # 遍历所有试验，按类别收集统计信息
+        print(f"正在处理 {len(self.all_data)} 个试验...")
+
+        for trial_idx in tqdm(range(len(self.all_data)),
+                              desc="计算特征统计",
+                              unit="trial",
+                              ncols=80):
+            data = self.all_data[trial_idx]  # shape: [num_features, seq_len]
+            class_label = self.all_labels[trial_idx]
+
+            if class_label == -1:
+                # 跳过未知类别
+                continue
+
+            # 对每个特征维度计算统计信息
+            for feat_idx in range(num_features):
+                feat_data = data[feat_idx, :]  # 该特征的所有时间步数据
+                feat_name = feature_names[feat_idx]
+
+                # 更新该类别该特征的最大值和最小值
+                feat_max = np.max(feat_data)
+                feat_min = np.min(feat_data)
+
+                breakpoint()
+
+                class_stats[class_label][feat_name]["max"] = max(
+                    class_stats[class_label][feat_name]["max"],
+                    feat_max
+                )
+                class_stats[class_label][feat_name]["min"] = min(
+                    class_stats[class_label][feat_name]["min"],
+                    feat_min
+                )
+
+                # 如果是体重特征，也更新全局体重统计
+                if self.use_participant_mass and "participant_mass" in feat_name:
+                    mass_stats["max"] = max(mass_stats["max"], feat_max)
+                    mass_stats["min"] = min(mass_stats["min"], feat_min)
+
+        # 构建最终的统计字典
+        final_stats = {}
+
+        # 添加每个类别的统计信息
+        for class_idx in range(len(self.action_patterns)):
+            class_key = f"class_{class_idx}"
+
+            # 只保存有数据的类别
+            has_data = any(
+                class_stats[class_idx][feat_name]["max"] != float('-inf')
+                for feat_name in feature_names
+            )
+
+            if has_data:
+                final_stats[class_key] = {}
+                for feat_name in feature_names:
+                    # 只保存有有效值的特征
+                    if class_stats[class_idx][feat_name]["max"] != float('-inf'):
+                        final_stats[class_key][feat_name] = {
+                            "max": float(class_stats[class_idx][feat_name]["max"]),
+                            "min": float(class_stats[class_idx][feat_name]["min"])
+                        }
+
+        # 添加参与者体重的全局统计（如果启用）
+        if self.use_participant_mass and mass_stats["max"] != float('-inf'):
+            final_stats["participant_mass"] = {
+                "max": float(mass_stats["max"]),
+                "min": float(mass_stats["min"])
+            }
+
+        # 保存到文件
+        output_file = os.path.join(output_dir, "feature_statistics.json")
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(final_stats, f, indent=2, ensure_ascii=False)
+
+        print(f"统计信息已保存到: {output_file}")
+        print(f"包含 {len([k for k in final_stats.keys() if k.startswith('class_')])} 个类别的统计信息")
+        print(f"每个类别包含 {num_features} 个特征")
+
+        # 打印示例统计信息
+        if len(final_stats) > 0:
+            print(f"\n示例统计信息 (class_0 的前3个特征):")
+            if "class_0" in final_stats:
+                count = 0
+                for feat_name, stats in final_stats["class_0"].items():
+                    print(f"  {feat_name}: max={stats['max']:.4f}, min={stats['min']:.4f}")
+                    count += 1
+                    if count >= 3:
+                        break
+
+        print(f"{'=' * 60}\n")
+
+        return final_stats
+
 
 def main():
     import importlib
@@ -585,6 +753,10 @@ def main():
                         help="选择加载的模式，如 'train', 'test', 或 'train,test'")
     parser.add_argument("--device", type=str, default="cpu",
                         help="设备，如 cpu 或 cuda:0")
+    parser.add_argument("--compute_stats", action="store_true",
+                        help="是否计算并保存特征统计信息")
+    parser.add_argument("--stats_dir", type=str, default="statistics",
+                        help="统计信息保存目录")
 
     args = parser.parse_args()
 
@@ -615,7 +787,7 @@ def main():
         participant_masses=config.participant_masses,
         device=device,
         mode=mode,
-        remove_nan=False,
+        remove_nan=True,
         remove_any_nan=True,
         activity_flag=config.activity_flag,
         use_participant_mass=getattr(config, 'use_participant_mass', False),
@@ -639,6 +811,10 @@ def main():
               f"中位 {np.median(dataset.trial_lengths):.1f}, "
               f"范围 [{np.min(dataset.trial_lengths)}, {np.max(dataset.trial_lengths)}]")
     print("=" * 70 + "\n")
+
+    # 计算并保存统计信息（如果指定）
+    if args.compute_stats:
+        dataset.compute_and_save_statistics(output_dir=args.stats_dir)
 
     # 创建DataLoader
     data_loader = DataLoader(dataset, batch_size=4, shuffle=True)
