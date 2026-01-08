@@ -97,6 +97,36 @@ action_patterns = [
     [r"^step_ups_.*"],  # 类别27: Step up
 ]
 
+# ==================== 归一化配置 ====================
+
+# 是否启用数据归一化
+enable_normalization = True
+
+# 特征统计文件路径（包含每个类别每个特征的最大最小值）
+# 该文件由 compute_and_save_statistics() 方法生成
+feature_statistics_path = os.path.join("data", "feature_statistics.json")
+
+# 归一化方法选择
+# 可选值:
+#   'linear': 线性归一化 (x - min) / (max - min)
+#   'tanh': 基于tanh的S型归一化，两端变化慢，中间变化快
+#   'power': 幂函数归一化 ((x - min) / (max - min)) ** alpha
+normalization_method = 'tanh'
+
+# 归一化方法的超参数
+normalization_params = {
+    # tanh方法的参数：控制S曲线的陡峭程度
+    # 值越大，中间区域越陡峭，两端越平缓
+    # 推荐范围: 2.0 - 6.0
+    'tanh_scale': 3.0,
+
+    # power方法的参数：幂指数
+    # alpha > 1: 数据向1端集中
+    # alpha < 1: 数据向0端集中
+    # alpha = 1: 等价于线性归一化
+    'power_alpha': 2.0
+}
+
 # ==================== 扩散模型配置 ====================
 
 # 模型维度配置

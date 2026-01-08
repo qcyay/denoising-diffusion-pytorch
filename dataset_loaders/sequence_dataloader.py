@@ -7,6 +7,7 @@ from torch.utils.data import Dataset
 import numpy as np
 from tqdm import tqdm
 
+
 class DiffusionSequenceDataset(Dataset):
     '''
     扩散模型专用序列数据集
@@ -32,7 +33,11 @@ class DiffusionSequenceDataset(Dataset):
                  remove_any_nan: bool = True,
                  activity_flag: bool = False,
                  use_participant_mass: bool = False,
-                 min_sequence_length: int = -1):
+                 min_sequence_length: int = -1,
+                 enable_normalization: bool = True,
+                 feature_statistics_path: str = None,
+                 normalization_method: str = 'linear',
+                 normalization_params: Dict = None):
         """
         初始化扩散模型序列数据集
 
@@ -52,6 +57,10 @@ class DiffusionSequenceDataset(Dataset):
             activity_flag: 是否启用activity_flag掩码功能(默认False)
             use_participant_mass: 是否使用参与者体重作为特征(默认False)
             min_sequence_length: 最小序列长度,-1表示不限制(默认-1)
+            enable_normalization: 是否启用数据归一化(默认False)
+            feature_statistics_path: 特征统计文件路径(包含每个类别每个特征的最大最小值)
+            normalization_method: 归一化方法('linear', 'tanh', 'power')
+            normalization_params: 归一化方法的超参数字典
         """
         self.data_dir = data_dir
         self.input_names = input_names
@@ -67,6 +76,19 @@ class DiffusionSequenceDataset(Dataset):
         self.activity_flag = activity_flag
         self.use_participant_mass = use_participant_mass
         self.min_sequence_length = min_sequence_length
+
+        # 归一化配置
+        self.enable_normalization = enable_normalization
+        self.feature_statistics_path = feature_statistics_path
+        self.normalization_method = normalization_method
+        self.normalization_params = normalization_params if normalization_params is not None else {}
+        self.feature_stats = None  # 存储加载的特征统计信息
+
+        # 加载特征统计信息（如果启用归一化）
+        if self.enable_normalization:
+            if self.feature_statistics_path is None:
+                raise ValueError("启用归一化时必须提供 feature_statistics_path")
+            self._load_feature_statistics()
 
         # 设置文件后缀映射
         if file_suffix is None:
@@ -90,7 +112,7 @@ class DiffusionSequenceDataset(Dataset):
             'trials_with_any_nan_data': 0  # 包含任何NaN的试验数
         }
 
-        # 测试,正式训练时改行需要注释
+        # 测试,正式训练时该行需要注释
         self.trial_names = self.trial_names[:100]
 
         # 序列长度过滤统计信息
@@ -254,6 +276,9 @@ class DiffusionSequenceDataset(Dataset):
             if (trial_idx + 1) % 10 == 0 or (trial_idx + 1) == len(self.trial_names):
                 print(f"  加载进度: {trial_idx + 1}/{len(self.trial_names)}")
 
+            # 提前获取类别标签（用于归一化）
+            class_label = self._get_class_label(trial_name)
+
             # 解析trial_name
             parts = trial_name.split(os.sep)
             if len(self.mode) > 1:
@@ -265,6 +290,7 @@ class DiffusionSequenceDataset(Dataset):
                 participant, action_type = parts[0], parts[1]
 
             # 构建文件路径前缀
+            # data/train/BT01/walk/BT01_walk
             file_prefix = os.path.join(self.data_dir, mode, participant,
                                        action_type, f"{participant}_{action_type}")
 
@@ -311,15 +337,194 @@ class DiffusionSequenceDataset(Dataset):
                 mass_data = self._create_mass_feature(participant, combined_data.shape[1])
                 combined_data = torch.cat([combined_data, mass_data], dim=0)
 
+            # 应用归一化（如果启用）
+            if self.enable_normalization and class_label != -1:
+                combined_data = self._normalize_data(combined_data, class_label)
+
             # 转换为numpy并存储
             self.all_data.append(combined_data.numpy())
 
             # 存储类别标签
-            class_label = self._get_class_label(trial_name)
             self.all_labels.append(class_label)
 
             # 存储序列长度
             self.trial_lengths.append(combined_data.shape[1])
+
+    def _load_feature_statistics(self):
+        '''加载特征统计信息文件'''
+        import json
+
+        if not os.path.exists(self.feature_statistics_path):
+            raise FileNotFoundError(
+                f"特征统计文件不存在: {self.feature_statistics_path}\n"
+                f"请先运行 compute_and_save_statistics() 方法生成统计文件"
+            )
+
+        with open(self.feature_statistics_path, 'r', encoding='utf-8') as f:
+            self.feature_stats = json.load(f)
+
+        print(f"已加载特征统计文件: {self.feature_statistics_path}")
+        print(f"统计文件包含 {len([k for k in self.feature_stats.keys() if k.startswith('class_')])} 个类别")
+
+    def _normalize_data(self, data: torch.Tensor, class_label: int) -> torch.Tensor:
+        '''
+        对数据进行归一化处理
+
+        参数:
+            data: 形状为 [num_features, seq_len] 的数据
+            class_label: 类别标签（用于查找对应的统计信息）
+
+        返回:
+            归一化后的数据，范围在 [0, 1]
+        '''
+        if self.feature_stats is None:
+            raise ValueError("特征统计信息未加载")
+
+        class_key = f"class_{class_label}"
+        if class_key not in self.feature_stats:
+            print(f"警告: 类别 {class_label} 的统计信息不存在，跳过归一化")
+            return data
+
+        class_stats = self.feature_stats[class_key]
+        feature_names = self._get_feature_names()
+
+        if len(feature_names) != data.shape[0]:
+            raise ValueError(
+                f"特征数量不匹配: data有{data.shape[0]}个特征，"
+                f"但特征名列表有{len(feature_names)}个"
+            )
+
+        # 对每个特征维度进行归一化
+        normalized_data = data.clone()
+
+        for feat_idx, feat_name in enumerate(feature_names):
+            if feat_name not in class_stats:
+                print(f"警告: 特征 {feat_name} 的统计信息不存在于类别 {class_label}，跳过该特征")
+                continue
+
+            feat_max = class_stats[feat_name]['max']
+            feat_min = class_stats[feat_name]['min']
+
+            # 处理体重特征（使用全局统计）
+            if self.use_participant_mass and 'participant_mass' in feat_name:
+                if 'participant_mass' in self.feature_stats:
+                    feat_max = self.feature_stats['participant_mass']['max']
+                    feat_min = self.feature_stats['participant_mass']['min']
+
+            # 避免除以零
+            if feat_max == feat_min:
+                normalized_data[feat_idx, :] = 0.0
+                continue
+
+            # 应用不同的归一化方法
+            if self.normalization_method == 'linear':
+                # 线性归一化: (x - min) / (max - min)
+                normalized_data[feat_idx, :] = (data[feat_idx, :] - feat_min) / (feat_max - feat_min)
+
+            elif self.normalization_method == 'tanh':
+                # S型归一化（基于tanh）
+                tanh_scale = self.normalization_params.get('tanh_scale', 3.0)
+                # 先线性归一化到[0, 1]
+                x_norm = (data[feat_idx, :] - feat_min) / (feat_max - feat_min)
+                # 映射到[-tanh_scale, tanh_scale]
+                x_scaled = (x_norm - 0.5) * 2 * tanh_scale
+                # 应用tanh并映射到[0, 1]
+                normalized_data[feat_idx, :] = (torch.tanh(x_scaled) + 1) / 2
+
+            elif self.normalization_method == 'power':
+                # 幂函数归一化
+                alpha = self.normalization_params.get('power_alpha', 2.0)
+                # 线性归一化到[0, 1]
+                x_norm = (data[feat_idx, :] - feat_min) / (feat_max - feat_min)
+                # 应用幂函数
+                normalized_data[feat_idx, :] = torch.pow(x_norm, alpha)
+
+            else:
+                raise ValueError(f"不支持的归一化方法: {self.normalization_method}")
+
+        return normalized_data
+
+    def denormalize_data(self, data: torch.Tensor, class_label: int) -> torch.Tensor:
+        '''
+        对归一化后的数据进行反变换
+
+        参数:
+            data: 形状为 [num_features, seq_len] 的归一化数据，范围在 [0, 1]
+            class_label: 类别标签（用于查找对应的统计信息）
+
+        返回:
+            反归一化后的原始尺度数据
+        '''
+        if not self.enable_normalization:
+            return data
+
+        if self.feature_stats is None:
+            raise ValueError("特征统计信息未加载")
+
+        class_key = f"class_{class_label}"
+        if class_key not in self.feature_stats:
+            print(f"警告: 类别 {class_label} 的统计信息不存在，无法反归一化")
+            return data
+
+        class_stats = self.feature_stats[class_key]
+        feature_names = self._get_feature_names()
+
+        if len(feature_names) != data.shape[0]:
+            raise ValueError(
+                f"特征数量不匹配: data有{data.shape[0]}个特征，"
+                f"但特征名列表有{len(feature_names)}个"
+            )
+
+        # 对每个特征维度进行反归一化
+        denormalized_data = data.clone()
+
+        for feat_idx, feat_name in enumerate(feature_names):
+            if feat_name not in class_stats:
+                continue
+
+            feat_max = class_stats[feat_name]['max']
+            feat_min = class_stats[feat_name]['min']
+
+            # 处理体重特征（使用全局统计）
+            if self.use_participant_mass and 'participant_mass' in feat_name:
+                if 'participant_mass' in self.feature_stats:
+                    feat_max = self.feature_stats['participant_mass']['max']
+                    feat_min = self.feature_stats['participant_mass']['min']
+
+            # 避免除以零
+            if feat_max == feat_min:
+                denormalized_data[feat_idx, :] = feat_min
+                continue
+
+            # 应用不同的反归一化方法
+            if self.normalization_method == 'linear':
+                # 线性反归一化: x = y * (max - min) + min
+                denormalized_data[feat_idx, :] = data[feat_idx, :] * (feat_max - feat_min) + feat_min
+
+            elif self.normalization_method == 'tanh':
+                # S型反归一化
+                tanh_scale = self.normalization_params.get('tanh_scale', 3.0)
+                # 从[0, 1]映射回tanh输出范围[-1, 1]
+                y = data[feat_idx, :] * 2 - 1
+                # 应用反tanh (arctanh)
+                x_scaled = torch.arctanh(torch.clamp(y, -0.9999, 0.9999))  # 避免数值不稳定
+                # 从[-tanh_scale, tanh_scale]映射回[0, 1]
+                x_norm = x_scaled / (2 * tanh_scale) + 0.5
+                # 从[0, 1]映射回原始范围
+                denormalized_data[feat_idx, :] = x_norm * (feat_max - feat_min) + feat_min
+
+            elif self.normalization_method == 'power':
+                # 幂函数反归一化
+                alpha = self.normalization_params.get('power_alpha', 2.0)
+                # 应用反幂函数
+                x_norm = torch.pow(data[feat_idx, :], 1.0 / alpha)
+                # 从[0, 1]映射回原始范围
+                denormalized_data[feat_idx, :] = x_norm * (feat_max - feat_min) + feat_min
+
+            else:
+                raise ValueError(f"不支持的归一化方法: {self.normalization_method}")
+
+        return denormalized_data
 
     def _load_input_data(self, file_path: str, column_names: List[str]) -> torch.Tensor:
         '''加载输入数据（传感器数据）'''
@@ -587,6 +792,9 @@ class DiffusionSequenceDataset(Dataset):
             for name in self.label_names:
                 feature_names.append(name.replace("*", s))
 
+            if self.activity_flag:
+                feature_names.append(f"activity_flag_{s}")
+
         # 参与者体重（只添加一次，不依赖于side）
         if self.use_participant_mass:
             feature_names.append("participant_mass")
@@ -637,10 +845,12 @@ class DiffusionSequenceDataset(Dataset):
 
         # 参与者体重统计（如果启用）
         mass_stats = None
-        if self.use_participant_mass:
+        if self.use_participant_mass and self.participant_masses:
+            # 直接从participant_masses字典中获取最大最小值
+            mass_values = list(self.participant_masses.values())
             mass_stats = {
-                "max": float('-inf'),
-                "min": float('inf')
+                "max": max(mass_values),
+                "min": min(mass_values)
             }
 
         # 遍历所有试验，按类别收集统计信息
@@ -666,8 +876,6 @@ class DiffusionSequenceDataset(Dataset):
                 feat_max = np.max(feat_data)
                 feat_min = np.min(feat_data)
 
-                breakpoint()
-
                 class_stats[class_label][feat_name]["max"] = max(
                     class_stats[class_label][feat_name]["max"],
                     feat_max
@@ -676,11 +884,6 @@ class DiffusionSequenceDataset(Dataset):
                     class_stats[class_label][feat_name]["min"],
                     feat_min
                 )
-
-                # 如果是体重特征，也更新全局体重统计
-                if self.use_participant_mass and "participant_mass" in feat_name:
-                    mass_stats["max"] = max(mass_stats["max"], feat_max)
-                    mass_stats["min"] = min(mass_stats["min"], feat_min)
 
         # 构建最终的统计字典
         final_stats = {}
@@ -706,7 +909,7 @@ class DiffusionSequenceDataset(Dataset):
                         }
 
         # 添加参与者体重的全局统计（如果启用）
-        if self.use_participant_mass and mass_stats["max"] != float('-inf'):
+        if self.use_participant_mass and mass_stats is not None:
             final_stats["participant_mass"] = {
                 "max": float(mass_stats["max"]),
                 "min": float(mass_stats["min"])
@@ -791,7 +994,11 @@ def main():
         remove_any_nan=True,
         activity_flag=config.activity_flag,
         use_participant_mass=getattr(config, 'use_participant_mass', False),
-        min_sequence_length=getattr(config, 'min_sequence_length', -1)
+        min_sequence_length=getattr(config, 'min_sequence_length', -1),
+        enable_normalization=getattr(config, 'enable_normalization', False),
+        feature_statistics_path=getattr(config, 'feature_statistics_path', None),
+        normalization_method=getattr(config, 'normalization_method', 'linear'),
+        normalization_params=getattr(config, 'normalization_params', None)
     )
 
     dataset_size = len(dataset)
@@ -805,6 +1012,17 @@ def main():
     print(f"序列数量: {dataset_size}")
     print(f"类别数量: {num_classes}")
     print(f"序列长度: {config.diffusion_sequence_length}")
+
+    # 归一化信息
+    if getattr(config, 'enable_normalization', False):
+        print(f"归一化: 启用")
+        print(f"  方法: {getattr(config, 'normalization_method', 'linear')}")
+        if getattr(config, 'normalization_method', 'linear') == 'tanh':
+            print(f"  参数: tanh_scale={getattr(config, 'normalization_params', {}).get('tanh_scale', 3.0)}")
+        elif getattr(config, 'normalization_method', 'linear') == 'power':
+            print(f"  参数: power_alpha={getattr(config, 'normalization_params', {}).get('power_alpha', 2.0)}")
+    else:
+        print(f"归一化: 未启用")
 
     if dataset.trial_lengths:
         print(f"序列长度统计 (帧) -> 平均 {np.mean(dataset.trial_lengths):.1f}, "
@@ -827,6 +1045,7 @@ def main():
         print(f"  标签值: {labels.tolist()}")
         print(f"  数据统计: min={data.min():.4f}, max={data.max():.4f}, "
               f"mean={data.mean():.4f}, std={data.std():.4f}")
+
         breakpoint()
 
         if batch_idx >= 2:
