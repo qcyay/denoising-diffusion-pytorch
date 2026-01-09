@@ -152,7 +152,7 @@ ema_decay = 0.995
 ema_update_every = 10
 
 # 保存和采样间隔
-save_and_sample_every = 1000
+save_and_sample_every = 10
 
 # 采样数量
 num_samples = 50

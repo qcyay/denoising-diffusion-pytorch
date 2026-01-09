@@ -197,6 +197,7 @@ class RandomOrLearnedSinusoidalPosEmb(nn.Module):
 
 class Block(nn.Module):
     """卷积 + RMSNorm + SiLU 的小模块。"""
+
     def __init__(self, dim, dim_out):
         super().__init__()
         self.proj = nn.Conv1d(dim, dim_out, 3, padding=1)
@@ -217,6 +218,7 @@ class Block(nn.Module):
 
 class ResnetBlock(nn.Module):
     """由两个 Block 组成的 ResNet 残差块，可注入时间信息和类别信息。"""
+
     def __init__(self, dim, dim_out, *, time_emb_dim=None, classes_emb_dim=None):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -253,6 +255,7 @@ class ResnetBlock(nn.Module):
 
 class LinearAttention(nn.Module):
     """线性化注意力：softmax 分解 + 可学习记忆 token，降低复杂度。"""
+
     def __init__(self, dim, heads=4, dim_head=32):
         super().__init__()
         # 缩放因子，用于稳定梯度
@@ -307,6 +310,7 @@ class LinearAttention(nn.Module):
 
 class Attention(nn.Module):
     """标准自注意力，支持 FlashAttention 与可学习记忆 token。"""
+
     def __init__(self, dim, heads=4, dim_head=32):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -357,6 +361,8 @@ class Unet1D(nn.Module):
             attn_heads=4
     ):
         super().__init__()
+
+        self.num_classes = num_classes
 
         # classifier free guidance stuff
 
@@ -419,7 +425,7 @@ class Unet1D(nn.Module):
         num_resolutions = len(in_out)
 
         for ind, (dim_in, dim_out) in enumerate(in_out):
-            is_last = ind >= (num_resolutions - 1) # 是否为最后一层
+            is_last = ind >= (num_resolutions - 1)  # 是否为最后一层
 
             self.downs.append(nn.ModuleList([
                 ResnetBlock(dim_in, dim_in, time_emb_dim=time_dim, classes_emb_dim=classes_dim),
@@ -589,14 +595,14 @@ class Unet1D(nn.Module):
         for block1, block2, attn, downsample in self.downs:
             # 每个阶段双残差块 -> 注意力 -> 下采样，且保存中间特征作 skip connection
             # 尺寸为[b, dim_in, n]
-            x = block1(x, t, c) # 第一个残差块
-            h.append(x) # 保存特征用于skip connection
+            x = block1(x, t, c)  # 第一个残差块
+            h.append(x)  # 保存特征用于skip connection
 
             # 尺寸为[b, dim_in, n]
-            x = block2(x, t, c) # 第二个残差块
+            x = block2(x, t, c)  # 第二个残差块
             # 尺寸为[b, dim_in, n]
-            x = attn(x) # 注意力模块
-            h.append(x) # 保存特征用于skip connection
+            x = attn(x)  # 注意力模块
+            h.append(x)  # 保存特征用于skip connection
 
             # 尺寸为[b, dim_out, n/2]
             x = downsample(x)
@@ -612,16 +618,16 @@ class Unet1D(nn.Module):
         # 解码器阶段（上采样）
         for block1, block2, attn, upsample in self.ups:
             # 解码阶段逐步拼接 skip feature 并上采样复原空间尺寸，尺寸为[b, dim_out + dim_in, n/2]
-            x = torch.cat((x, h.pop()), dim=1) # 拼接skip connection特征
+            x = torch.cat((x, h.pop()), dim=1)  # 拼接skip connection特征
             # 尺寸为[b, dim_out, n/2]
-            x = block1(x, t, c) # 第一个残差块
+            x = block1(x, t, c)  # 第一个残差块
 
             # 尺寸为[b, dim_out + dim_in, n/2]
-            x = torch.cat((x, h.pop()), dim=1) # 拼接skip connection特征
+            x = torch.cat((x, h.pop()), dim=1)  # 拼接skip connection特征
             # 尺寸为[b, dim_out, n/2]
-            x = block2(x, t, c) # 第二个残差块
+            x = block2(x, t, c)  # 第二个残差块
             # 尺寸为[b, dim_out, n/2]
-            x = attn(x) # 注意力模块
+            x = attn(x)  # 注意力模块
 
             # 尺寸为[b, dim_out, n]
             x = upsample(x)
@@ -1021,7 +1027,7 @@ class GaussianDiffusion1D(nn.Module):
         return img
 
     @torch.no_grad()
-    def sample(self, classes, batch_size = 16, cond_scale=6., rescaled_phi=0.7):
+    def sample(self, classes, batch_size=16, cond_scale=6., rescaled_phi=0.7):
         """根据配置选择 DDPM 或 DDIM 采样接口，对外提供统一入口。"""
         seq_length, channels = self.seq_length, self.channels
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
@@ -1270,7 +1276,6 @@ class Trainer1D(object):
             'ema': self.ema.state_dict(),
             'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
             'loss_history': self.loss_history,  # 保存损失历史
-            'version': __version__
         }
 
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
@@ -1378,15 +1383,29 @@ class Trainer1D(object):
                             milestone = self.step // self.save_and_sample_every
                             # 将 num_samples 拆成若干批（因为单次采样 batch_size 受显存限制）
                             batches = num_to_groups(self.num_samples, self.batch_size)
-                            # TODO 应该需要加入类别
-                            # 对每个批次调用 EMA 模型的 sample 函数，生成样本，尺寸为[b,c,n]
-                            all_samples_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
 
-                        # 拼接所有生成图片为一个大 tensor：[N, C, N]
+                            # 为每个批次随机生成类别标签
+                            all_samples_list = []
+                            all_labels_list = []
+                            for n in batches:
+                                # 随机生成类别标签，范围为 [0, num_classes)
+                                batch_labels = torch.randint(0, self.model.model.num_classes, (n,), device=device)
+                                # 使用生成的类别标签进行采样
+                                batch_samples = self.ema.ema_model.sample(classes=batch_labels, batch_size=n)
+                                all_samples_list.append(batch_samples)
+                                all_labels_list.append(batch_labels)
+
+                        # 拼接所有生成样本为一个大 tensor：[N, C, seq_length]
                         all_samples = torch.cat(all_samples_list, dim=0)
+                        # 拼接所有标签为一个大 tensor：[N]
+                        all_labels = torch.cat(all_labels_list, dim=0)
 
-                        # 保存样本
-                        torch.save(all_samples, str(self.results_folder / f'sample-{milestone}.png'))
+                        # 保存样本和标签到.pt文件
+                        save_dict = {
+                            'samples': all_samples.cpu(),
+                            'labels': all_labels.cpu()
+                        }
+                        torch.save(save_dict, str(self.results_folder / f'sample-{milestone}.pt'))
                         self.save(milestone)
 
                 pbar.update(1)
