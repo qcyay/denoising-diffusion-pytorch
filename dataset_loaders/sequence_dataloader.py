@@ -3,10 +3,22 @@ import re
 from typing import List, Dict, Optional, Tuple, Union
 import pandas as pd
 import torch
+import torch.distributed as dist
 from torch.utils.data import Dataset
 import numpy as np
 from tqdm import tqdm
 
+def print_rank_0(*args, **kwargs):
+    # 获取当前进程的 rank
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        print(rank)
+    else:
+        rank = 0  # 如果没有初始化分布式环境，默认为rank 0
+
+    # 只有 rank 为 0 时才打印
+    if rank == 0:
+        print(*args, **kwargs)
 
 class DiffusionSequenceDataset(Dataset):
     '''
@@ -109,8 +121,8 @@ class DiffusionSequenceDataset(Dataset):
             'trials_with_any_nan_data': 0  # 包含任何NaN的试验数
         }
 
-        # 测试,正式训练时该行需要注释
-        self.trial_names = self.trial_names[:100]
+        # # 测试,正式训练时该行需要注释
+        # self.trial_names = self.trial_names[:100]
 
         # 序列长度过滤统计信息
         self.length_filter_stats = {
@@ -123,10 +135,10 @@ class DiffusionSequenceDataset(Dataset):
             'max_length_after': 0
         }
 
-        print(f"开始加载 {'/'.join(self.mode)} 数据集 (用于扩散模型训练)...")
-        print(f"找到 {len(self.trial_names)} 个试验")
-        print(f"使用侧别: {', '.join(self.side)}")
-        print(f"运动类别数: {len(self.action_patterns)}")
+        print_rank_0(f"开始加载 {'/'.join(self.mode)} 数据集 (用于扩散模型训练)...")
+        print_rank_0(f"找到 {len(self.trial_names)} 个试验")
+        print_rank_0(f"使用侧别: {', '.join(self.side)}")
+        print_rank_0(f"运动类别数: {len(self.action_patterns)}")
 
         # 预加载所有数据到内存
         self.all_data = []  # 存储所有试验的合并数据(传感器+力矩+其他特征)
@@ -147,10 +159,10 @@ class DiffusionSequenceDataset(Dataset):
             self._remove_sequences_with_nan()
 
         # 生成序列索引
-        print(f"生成序列索引...")
+        print_rank_0(f"生成序列索引...")
         self.sequences = self._generate_sequences()
 
-        print(f"数据集初始化完成 - 模式: {'/'.join(self.mode)}, "
+        print_rank_0(f"数据集初始化完成 - 模式: {'/'.join(self.mode)}, "
               f"试验数量: {len(self.trial_names)}, "
               f"序列数量: {len(self.sequences)}")
 
@@ -214,7 +226,7 @@ class DiffusionSequenceDataset(Dataset):
                     return class_idx
 
         # 如果没有匹配到任何pattern，返回-1表示未知类别
-        print(f"警告: 试验 {trial_name} 无法匹配任何运动类型pattern")
+        print_rank_0(f"警告: 试验 {trial_name} 无法匹配任何运动类型pattern")
         return -1
 
     def _is_action_matched(self, action_type: str) -> bool:
@@ -238,7 +250,7 @@ class DiffusionSequenceDataset(Dataset):
             mode_dir = os.path.join(self.data_dir, mode)
 
             if not os.path.exists(mode_dir):
-                print(f"警告: 模式目录不存在: {mode_dir}")
+                print_rank_0(f"警告: 模式目录不存在: {mode_dir}")
                 continue
 
             for participant in os.listdir(mode_dir):
@@ -271,7 +283,7 @@ class DiffusionSequenceDataset(Dataset):
         '''预加载所有试验的数据到内存'''
         for trial_idx, trial_name in enumerate(self.trial_names):
             if (trial_idx + 1) % 10 == 0 or (trial_idx + 1) == len(self.trial_names):
-                print(f"  加载进度: {trial_idx + 1}/{len(self.trial_names)}")
+                print_rank_0(f"  加载进度: {trial_idx + 1}/{len(self.trial_names)}")
 
             # 提前获取类别标签（用于归一化）
             class_label = self._get_class_label(trial_name)
@@ -360,8 +372,8 @@ class DiffusionSequenceDataset(Dataset):
         with open(self.feature_statistics_path, 'r', encoding='utf-8') as f:
             self.feature_stats = json.load(f)
 
-        print(f"已加载特征统计文件: {self.feature_statistics_path}")
-        print(f"统计文件包含 {len([k for k in self.feature_stats.keys() if k.startswith('class_')])} 个类别")
+        print_rank_0(f"已加载特征统计文件: {self.feature_statistics_path}")
+        print_rank_0(f"统计文件包含 {len([k for k in self.feature_stats.keys() if k.startswith('class_')])} 个类别")
 
     def _normalize_data(self, data: torch.Tensor, class_label: int) -> torch.Tensor:
         '''
@@ -614,7 +626,7 @@ class DiffusionSequenceDataset(Dataset):
 
             # 检查数据长度是否足够
             if data_len < self.diffusion_sequence_length:
-                print(f"警告: 试验 {self.trial_names[trial_idx]} 数据长度不足 "
+                print_rank_0(f"警告: 试验 {self.trial_names[trial_idx]} 数据长度不足 "
                       f"(需要{self.diffusion_sequence_length}, 实际{data_len})，跳过")
                 continue
 
@@ -665,7 +677,7 @@ class DiffusionSequenceDataset(Dataset):
             if not np.all(np.isnan(data)):
                 valid_indices.append(i)
             else:
-                print(f"移除数据全为NaN的试验: {self.trial_names[i]}")
+                print_rank_0(f"移除数据全为NaN的试验: {self.trial_names[i]}")
                 self.nan_removal_stats['trials_with_all_nan_data'] += 1
 
         # 过滤数据
@@ -683,7 +695,7 @@ class DiffusionSequenceDataset(Dataset):
             if not np.any(np.isnan(data)):
                 valid_indices.append(i)
             else:
-                print(f"移除包含NaN的试验: {self.trial_names[i]}")
+                print_rank_0(f"移除包含NaN的试验: {self.trial_names[i]}")
                 self.nan_removal_stats['trials_with_any_nan_data'] += 1
 
         # 过滤数据
@@ -713,11 +725,11 @@ class DiffusionSequenceDataset(Dataset):
             self.feature_sources.append(f"参与者体重: 1 feature")
 
         # 打印信息
-        print(f"\n{'=' * 60}")
-        print(f"特征拼接信息")
-        print(f"{'=' * 60}")
+        print_rank_0(f"\n{'=' * 60}")
+        print_rank_0(f"特征拼接信息")
+        print_rank_0(f"{'=' * 60}")
         for i, source in enumerate(self.feature_sources, 1):
-            print(f"{i}. {source}")
+            print_rank_0(f"{i}. {source}")
 
         # 计算总特征数
         total_features = 0
@@ -729,43 +741,43 @@ class DiffusionSequenceDataset(Dataset):
         if self.use_participant_mass:
             total_features += 1
 
-        print(f"\n总特征数: {total_features}")
-        print(f"{'=' * 60}\n")
+        print_rank_0(f"\n总特征数: {total_features}")
+        print_rank_0(f"{'=' * 60}\n")
 
     def print_length_filter_summary(self):
         """打印序列长度过滤统计摘要"""
         stats = self.length_filter_stats
-        print(f"\n{'=' * 60}")
-        print(f"序列长度过滤统计摘要 - {'/'.join(self.mode).upper()} 数据集")
-        print(f"{'=' * 60}")
-        print(f"最小序列长度阈值: {self.min_sequence_length}")
-        print(f"过滤前试验数量: {stats['trials_before_filter']}")
-        print(f"过滤后试验数量: {stats['trials_after_filter']}")
-        print(f"被过滤掉的试验数: {stats['trials_filtered_out']}")
+        print_rank_0(f"\n{'=' * 60}")
+        print_rank_0(f"序列长度过滤统计摘要 - {'/'.join(self.mode).upper()} 数据集")
+        print_rank_0(f"{'=' * 60}")
+        print_rank_0(f"最小序列长度阈值: {self.min_sequence_length}")
+        print_rank_0(f"过滤前试验数量: {stats['trials_before_filter']}")
+        print_rank_0(f"过滤后试验数量: {stats['trials_after_filter']}")
+        print_rank_0(f"被过滤掉的试验数: {stats['trials_filtered_out']}")
 
         if stats['trials_before_filter'] > 0:
             filter_percentage = 100 * stats['trials_filtered_out'] / stats['trials_before_filter']
-            print(f"过滤比例: {filter_percentage:.2f}%")
+            print_rank_0(f"过滤比例: {filter_percentage:.2f}%")
 
         if stats['min_length_before'] > 0:
-            print(f"过滤前序列长度范围: [{stats['min_length_before']}, {stats['max_length_before']}]")
+            print_rank_0(f"过滤前序列长度范围: [{stats['min_length_before']}, {stats['max_length_before']}]")
 
         if stats['trials_after_filter'] > 0 and stats['min_length_after'] > 0:
-            print(f"过滤后序列长度范围: [{stats['min_length_after']}, {stats['max_length_after']}]")
+            print_rank_0(f"过滤后序列长度范围: [{stats['min_length_after']}, {stats['max_length_after']}]")
 
-        print(f"{'=' * 60}\n")
+        print_rank_0(f"{'=' * 60}\n")
 
     def print_nan_removal_summary(self):
         """打印NaN移除统计摘要"""
         stats = self.nan_removal_stats
-        print(f"\n{'=' * 60}")
-        print(f"NaN移除统计摘要 - {'/'.join(self.mode).upper()} 数据集")
-        print(f"{'=' * 60}")
+        print_rank_0(f"\n{'=' * 60}")
+        print_rank_0(f"NaN移除统计摘要 - {'/'.join(self.mode).upper()} 数据集")
+        print_rank_0(f"{'=' * 60}")
         if self.remove_nan:
-            print(f"数据全为NaN的试验数: {stats['trials_with_all_nan_data']}")
+            print_rank_0(f"数据全为NaN的试验数: {stats['trials_with_all_nan_data']}")
         if self.remove_any_nan:
-            print(f"包含NaN的试验数: {stats['trials_with_any_nan_data']}")
-        print(f"{'=' * 60}\n")
+            print_rank_0(f"包含NaN的试验数: {stats['trials_with_any_nan_data']}")
+        print_rank_0(f"{'=' * 60}\n")
 
     def get_num_classes(self) -> int:
         """返回类别数量"""

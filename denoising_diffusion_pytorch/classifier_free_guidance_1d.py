@@ -9,6 +9,7 @@ from multiprocessing import cpu_count
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.amp import autocast
 
 from einops import rearrange, reduce, repeat, pack, unpack

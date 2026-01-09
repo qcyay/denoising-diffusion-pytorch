@@ -142,7 +142,7 @@ timesteps = 1000
 # 训练配置
 train_batch_size = 512
 train_lr = 1e-4
-train_num_steps = 700000
+train_num_steps = 10000000
 
 # 梯度累积步数
 gradient_accumulate_every = 2
@@ -152,16 +152,16 @@ ema_decay = 0.995
 ema_update_every = 10
 
 # 保存和采样间隔
-save_and_sample_every = 10
+save_and_sample_every = 5000
 
 # 采样数量
 num_samples = 50
 
 # 结果保存目录
-results_folder = './logs'
+results_folder = './logs/0'
 
 # 混合精度训练
-amp = True
+amp = False
 
 # Classifier-free guidance配置
 # 在训练时随机丢弃类别标签的概率
