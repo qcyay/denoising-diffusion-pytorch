@@ -26,7 +26,6 @@ class DiffusionSequenceDataset(Dataset):
                  diffusion_sequence_length: int,
                  action_patterns: List[str],
                  participant_masses: Dict[str, float] = {},
-                 device: torch.device = torch.device("cpu"),
                  mode: Union[str, List[str]] = "train",
                  file_suffix: Dict[str, str] = None,
                  remove_nan: bool = False,
@@ -49,7 +48,6 @@ class DiffusionSequenceDataset(Dataset):
             diffusion_sequence_length: 序列长度（子序列的时间步数）
             action_patterns: 运动类型筛选的正则表达式列表
             participant_masses: 参与者体重字典
-            device: 计算设备
             mode: 数据集模式，'train'、'test' 或 ['train', 'test']
             file_suffix: 文件后缀映射字典
             remove_nan: 是否移除数据全为NaN的序列
@@ -69,7 +67,6 @@ class DiffusionSequenceDataset(Dataset):
         self.diffusion_sequence_length = diffusion_sequence_length
         self.action_patterns = action_patterns
         self.participant_masses = participant_masses
-        self.device = device
         self.mode = [mode] if isinstance(mode, str) else mode
         self.remove_nan = remove_nan
         self.remove_any_nan = remove_any_nan
@@ -774,6 +771,15 @@ class DiffusionSequenceDataset(Dataset):
         """返回类别数量"""
         return len(self.action_patterns)
 
+    def get_num_features(self) -> int:
+        """
+        返回特征的总数量
+
+        返回:
+            特征总数（包括输入特征、力矩特征、activity_flag和体重特征）
+        """
+        return len(self._get_feature_names())
+
     def _get_feature_names(self) -> List[str]:
         """
         获取所有特征的名称列表（与数据维度对应）
@@ -974,7 +980,7 @@ def main():
     # 导入配置
     config = importlib.import_module(args.config)
 
-    device = torch.device(args.device)
+    # device = torch.device(args.device)
 
     # 解析mode参数
     mode = args.mode.split(',') if ',' in args.mode else args.mode
@@ -988,7 +994,6 @@ def main():
         diffusion_sequence_length=config.diffusion_sequence_length,
         action_patterns=config.action_patterns,
         participant_masses=config.participant_masses,
-        device=device,
         mode=mode,
         remove_nan=True,
         remove_any_nan=True,

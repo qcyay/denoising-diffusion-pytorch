@@ -6,6 +6,9 @@ import torch
 # 相对路径:训练好的模型保存位置
 model_path = os.path.join("logs", "diffusion_model.pt")
 
+# 数据集配置
+mode = ['train', 'test']
+
 # 相对路径:数据目录
 data_dir = 'data'
 
@@ -60,7 +63,7 @@ label_names = ["hip_flexion_*_moment", "knee_angle_*_moment"]
 min_sequence_length = -1
 
 # 扩散模型的子序列长度（每个样本的时间步数）
-diffusion_sequence_length = 300
+diffusion_sequence_length = 296
 
 # 运动类型筛选模式（使用正则表达式）
 # 每个元素可以是单个pattern或多个patterns的列表，同一元素内的patterns属于同一类别
@@ -137,7 +140,7 @@ dim_mults = (1, 2, 4, 8)
 timesteps = 1000
 
 # 训练配置
-train_batch_size = 32
+train_batch_size = 512
 train_lr = 1e-4
 train_num_steps = 700000
 
@@ -152,10 +155,10 @@ ema_update_every = 10
 save_and_sample_every = 1000
 
 # 采样数量
-num_samples = 25
+num_samples = 50
 
 # 结果保存目录
-results_folder = './results'
+results_folder = './logs'
 
 # 混合精度训练
 amp = True

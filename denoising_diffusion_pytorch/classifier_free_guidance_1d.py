@@ -16,6 +16,8 @@ from einops.layers.torch import Rearrange
 
 from accelerate import Accelerator
 from ema_pytorch import EMA
+from torch.optim import Adam
+from torch.utils.data import Dataset, DataLoader
 
 from tqdm.auto import tqdm
 
@@ -139,7 +141,7 @@ def Downsample(dim, dim_out=None):
 class RMSNorm(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
+        self.g = nn.Parameter(torch.ones(1, dim, 1))
 
     def forward(self, x):
         return F.normalize(x, dim=1) * self.g * (x.shape[1] ** 0.5)
@@ -331,7 +333,7 @@ class Attention(nn.Module):
         out = einsum('b h i j, b h d j -> b h i d', attn, v)
 
         # 尺寸为[b, dim_head * heads, n]
-        out = rearrange(out, 'b h n d -> b (h d) n', x=h, y=w)
+        out = rearrange(out, 'b h n d -> b (h d) n')
         return self.to_out(out)
 
 
@@ -685,7 +687,7 @@ class GaussianDiffusion1D(nn.Module):
     ):
         super().__init__()
         # 验证模型配置：确保通道数与输出维度匹配
-        assert not (type(self) == GaussianDiffusion and model.channels != model.out_dim)
+        assert not (type(self) == GaussianDiffusion1D and model.channels != model.out_dim)
         assert not model.random_or_learned_sinusoidal_cond
 
         self.model = model
@@ -1127,7 +1129,7 @@ class GaussianDiffusion1D(nn.Module):
         loss = loss * extract(self.loss_weight, t, loss.shape)
         return loss.mean()
 
-    def forward(self, img, *args, **kwargs):
+    def forward(self, img, classes, *args, **kwargs):
         """
         Trainer/Accelerator 调用的统一入口，对输入数据随机采样 t 并计算损失。
         Args:
@@ -1146,7 +1148,7 @@ class GaussianDiffusion1D(nn.Module):
         # 归一化图像，从[0,1]到[-1,1]
         img = normalize_to_neg_one_to_one(img)
         # 计算损失
-        return self.p_losses(img, t, *args, **kwargs)
+        return self.p_losses(img, t, classes=classes, *args, **kwargs)
 
 
 # example
@@ -1198,8 +1200,6 @@ class Trainer1D(object):
         # sampling and training hyperparameters
 
         # 采样与训练超参数
-        # 验证采样图像数量是否有整数平方根（用于网格显示）
-        assert has_int_squareroot(num_samples), 'number of samples must have an integer square root'
         self.num_samples = num_samples
         self.save_and_sample_every = save_and_sample_every
 
@@ -1315,7 +1315,7 @@ class Trainer1D(object):
 
         # 使用 tqdm 包装训练进度条
         # initial=self.step 支持从中途恢复训练
-        with tqdm(initial=self.step, total=self.train_num_steps, disable=not accelerator.is_main_process) as pbar:
+        with (tqdm(initial=self.step, total=self.train_num_steps, disable=not accelerator.is_main_process) as pbar):
 
             # 主训练循环，直到 step 达到 train_num_steps
             while self.step < self.train_num_steps:
@@ -1329,12 +1329,16 @@ class Trainer1D(object):
                 # 可达到“更大 batch 训练”的效果，而不需要增加显存
                 for _ in range(self.gradient_accumulate_every):
                     # 从无限循环的 dataloader 中取出一个 batch，并移动到目标 device
-                    data = next(self.dl).to(device)
+                    data, labels = next(self.dl)
+                    # 尺寸为[B,C,N]
+                    data = data.to(device)
+                    # 尺寸为[B]
+                    labels = labels.to(device)
 
                     # autocast：在混合精度下，自动推断使用 FP16 / FP32
                     with self.accelerator.autocast():
                         # 扩散模型通常将“输入 x -> 返回 loss”
-                        loss = self.model(data)
+                        loss = self.model(data, labels)
                         # 除以累积次数，等价于对多个 batch 的 loss 取平均
                         loss = loss / self.gradient_accumulate_every
                         total_loss += loss.item()  # 记录到 total_loss 统计值中
@@ -1393,16 +1397,16 @@ class Trainer1D(object):
 if __name__ == '__main__':
     num_classes = 10
 
-    model = Unet(
+    model = Unet1D(
         dim=64,
         dim_mults=(1, 2, 4, 8),
         num_classes=num_classes,
         cond_drop_prob=0.5
     )
 
-    diffusion = GaussianDiffusion(
+    diffusion = GaussianDiffusion1D(
         model,
-        image_size=128,
+        seq_length=128,
         timesteps=1000
     ).cuda()
 
