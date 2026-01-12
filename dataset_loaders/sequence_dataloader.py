@@ -8,17 +8,28 @@ from torch.utils.data import Dataset
 import numpy as np
 from tqdm import tqdm
 
+
 def print_rank_0(*args, **kwargs):
-    # 获取当前进程的 rank
-    if dist.is_initialized():
+    """只在主进程打印信息，支持Accelerate和PyTorch原生分布式训练"""
+    rank = 0
+
+    # 方法1: 检查Accelerate环境变量（优先级最高）
+    # Accelerate会设置LOCAL_RANK或RANK环境变量
+    if 'LOCAL_RANK' in os.environ:
+        rank = int(os.environ['LOCAL_RANK'])
+    elif 'RANK' in os.environ:
+        rank = int(os.environ['RANK'])
+    # 方法2: 检查PyTorch原生分布式
+    elif dist.is_initialized():
         rank = dist.get_rank()
-        print(rank)
+    # 方法3: 默认为rank 0（单进程训练）
     else:
-        rank = 0  # 如果没有初始化分布式环境，默认为rank 0
+        rank = 0
 
     # 只有 rank 为 0 时才打印
     if rank == 0:
         print(*args, **kwargs)
+
 
 class DiffusionSequenceDataset(Dataset):
     '''
@@ -163,8 +174,8 @@ class DiffusionSequenceDataset(Dataset):
         self.sequences = self._generate_sequences()
 
         print_rank_0(f"数据集初始化完成 - 模式: {'/'.join(self.mode)}, "
-              f"试验数量: {len(self.trial_names)}, "
-              f"序列数量: {len(self.sequences)}")
+                     f"试验数量: {len(self.trial_names)}, "
+                     f"序列数量: {len(self.sequences)}")
 
         # 打印特征拼接信息
         self._print_feature_sources()
@@ -627,7 +638,7 @@ class DiffusionSequenceDataset(Dataset):
             # 检查数据长度是否足够
             if data_len < self.diffusion_sequence_length:
                 print_rank_0(f"警告: 试验 {self.trial_names[trial_idx]} 数据长度不足 "
-                      f"(需要{self.diffusion_sequence_length}, 实际{data_len})，跳过")
+                             f"(需要{self.diffusion_sequence_length}, 实际{data_len})，跳过")
                 continue
 
             # 生成所有有效的起始索引

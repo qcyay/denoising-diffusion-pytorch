@@ -22,8 +22,26 @@ from dataset_loaders.sequence_dataloader import DiffusionSequenceDataset
 from denoising_diffusion_pytorch.classifier_free_guidance_1d import Unet1D, GaussianDiffusion1D, Trainer1D
 
 # 设置 CUDA_VISIBLE_DEVICES 来指定可见的 GPU（例如 GPU 1 和 GPU 2）
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 
+
+def get_rank():
+    """获取当前进程的rank，支持Accelerate和PyTorch原生分布式训练"""
+    # 方法1: 检查Accelerate环境变量（优先级最高）
+    if 'LOCAL_RANK' in os.environ:
+        return int(os.environ['LOCAL_RANK'])
+    elif 'RANK' in os.environ:
+        return int(os.environ['RANK'])
+    # 方法2: 检查PyTorch原生分布式
+    elif dist.is_initialized():
+        return dist.get_rank()
+    # 方法3: 默认为rank 0（单进程训练）
+    else:
+        return 0
+
+def is_main_process():
+    """检查当前进程是否为主进程"""
+    return get_rank() == 0
 
 class Logger:
     """同时输出到控制台和文件的日志记录器"""
@@ -96,20 +114,25 @@ def main():
     print_rank_0(f"✓ 配置文件已加载: {args.config}")
 
     # ==================== 创建结果目录并设置日志 ====================
-    # 创建结果目录
-    results_folder = Path(config.results_folder)
-    results_folder.mkdir(parents=True, exist_ok=True)
+    # 只在主进程创建结果目录和日志文件
+    if is_main_process():
+        results_folder = Path(config.results_folder)
+        results_folder.mkdir(parents=True, exist_ok=True)
 
-    # 设置日志文件（使用时间戳避免覆盖）
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = results_folder / f"training_log_{timestamp}.txt"
+        # 设置日志文件（使用时间戳避免覆盖）
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = results_folder / f"training_log_{timestamp}.txt"
 
-    # 重定向stdout到Logger
-    sys.stdout = Logger(log_file)
-    print_rank_0(f"✓ 日志文件已创建: {log_file}")
+        # 重定向stdout到Logger
+        sys.stdout = Logger(log_file)
+        print_rank_0(f"✓ 日志文件已创建: {log_file}")
+    else:
+        # 非主进程也需要知道results_folder路径
+        results_folder = Path(config.results_folder)
 
     # ==================== 备份配置文件 ====================
-    backup_config_file(args.config, results_folder)
+    if is_main_process():
+        backup_config_file(args.config, results_folder)
 
     # ==================== 设置随机种子 ====================
     set_seed(config.random_seed)

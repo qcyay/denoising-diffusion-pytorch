@@ -1203,6 +1203,7 @@ class Trainer1D(object):
         # 模型引用与通道配置
         self.model = diffusion_model
         self.channels = diffusion_model.channels
+        self.num_classes = diffusion_model.model.num_classes
 
         # sampling and training hyperparameters
 
@@ -1390,7 +1391,7 @@ class Trainer1D(object):
                             all_labels_list = []
                             for n in batches:
                                 # 随机生成类别标签，范围为 [0, num_classes)
-                                batch_labels = torch.randint(0, self.model.model.num_classes, (n,), device=device)
+                                batch_labels = torch.randint(0, self.num_classes, (n,), device=device)
                                 # 使用生成的类别标签进行采样
                                 batch_samples = self.ema.ema_model.sample(classes=batch_labels, batch_size=n)
                                 all_samples_list.append(batch_samples)
