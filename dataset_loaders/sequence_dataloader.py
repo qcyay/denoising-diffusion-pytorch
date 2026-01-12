@@ -477,7 +477,7 @@ class DiffusionSequenceDataset(Dataset):
         '''
         if not self.enable_normalization:
             return data
-
+        
         if self.feature_stats is None:
             raise ValueError("特征统计信息未加载")
 

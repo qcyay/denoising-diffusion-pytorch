@@ -94,7 +94,15 @@ class SampleVisualizer:
 
         try:
             # 加载配置模块
-            self.config = importlib.import_module(config_name)
+            if '/' in config_name or '\\' in config_name or config_name.endswith('.py'):
+                # 文件路径形式：configs/default_config.py
+                filepath = config_name.replace('\\', '/').rstrip('.py') + '.py'
+                spec = importlib.util.spec_from_file_location("config", filepath)
+                self.config = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(self.config)
+            else:
+                # 模块名形式：configs.default_config
+                self.config = importlib.import_module(config_name)
             print(f"✓ 配置文件加载成功")
 
             # 从配置文件提取必要参数
