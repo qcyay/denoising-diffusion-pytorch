@@ -477,7 +477,7 @@ class DiffusionSequenceDataset(Dataset):
         '''
         if not self.enable_normalization:
             return data
-        
+
         if self.feature_stats is None:
             raise ValueError("特征统计信息未加载")
 
@@ -1023,7 +1023,7 @@ def main():
         activity_flag=config.activity_flag,
         use_participant_mass=getattr(config, 'use_participant_mass', False),
         min_sequence_length=getattr(config, 'min_sequence_length', -1),
-        enable_normalization=getattr(config, 'enable_normalization', False),
+        enable_normalization=getattr(config, 'enable_normalization', True),
         feature_statistics_path=getattr(config, 'feature_statistics_path', None),
         normalization_method=getattr(config, 'normalization_method', 'linear'),
         normalization_params=getattr(config, 'normalization_params', None)

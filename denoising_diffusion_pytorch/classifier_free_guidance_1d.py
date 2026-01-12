@@ -1402,6 +1402,18 @@ class Trainer1D(object):
                         # 拼接所有标签为一个大 tensor：[N]
                         all_labels = torch.cat(all_labels_list, dim=0)
 
+                        # 反归一化采样数据（从[0,1]恢复到原始范围）
+                        if self.dataset.enable_normalization:
+                            print("正在反归一化采样数据...")
+                            denormalized_samples = []
+                            for i in range(all_samples.shape[0]):
+                                sample = all_samples[i]  # [C, seq_length]
+                                label = all_labels[i].item()
+                                denormalized_sample = self.dataset.denormalize_data(sample, label)
+                                denormalized_samples.append(denormalized_sample)
+                            all_samples = torch.stack(denormalized_samples, dim=0)
+                            print(f"✓ 反归一化完成，数据恢复到原始范围")
+
                         # 保存样本和标签到.pt文件
                         save_dict = {
                             'samples': all_samples.cpu(),
