@@ -1,0 +1,20 @@
+## 查找体重最接近真实用户
+python utils/visualize_synthetic_data.py --config configs/default_config.py --class_id 18 --synthetic_dir /datasets/denoising-diffusion-pytorch/logs/0/model-151/synthetic_data --find_participant --synthetic_id 0
+## 计算特征距离
+# 传感器数据
+python utils/visualize_synthetic_data.py --config configs/default_config.py --class_id 18 --synthetic_dir /datasets/denoising-diffusion-pytorch/logs/0/model-151/synthetic_data --participant BT12 --compute_norm\
+ --feature_indices 0,1,2,3,4,5 --output_dir logs/0/visualizations_milestone_151/vis_synthetic --synthetic_id 0
+# 力矩数据
+python utils/visualize_synthetic_data.py --config configs/default_config.py --class_id 18 --synthetic_dir /datasets/denoising-diffusion-pytorch/logs/0/model-151/synthetic_data --participant BT12 --compute_norm\
+ --feature_indices 25,26,53,54 --output_dir logs/0/visualizations_milestone_151/vis_synthetic --synthetic_id 0
+## 单独可视化
+python utils/visualize_synthetic_data.py --config configs/default_config.py --class_id 18 --synthetic_dir /datasets/denoising-diffusion-pytorch/logs/0/model-151/synthetic_data --visualize\
+ --participant BT06 --feature_indices 0,1,2,3,4,5 --real_start_idx 3602 --output_dir logs/0/visualizations_milestone_151/vis_synthetic --synthetic_id 1
+## 和真实图像一起可视化
+# 传感器数据可视化
+python utils/visualize_synthetic_data.py --config configs/default_config.py --class_id 18 --synthetic_id 0 --synthetic_dir /datasets/denoising-diffusion-pytorch/logs/0/model-151/synthetic_data --visualize\
+ --participant BT12 --feature_indices 0,1,2,3,4,5 --real_data_path train/BT12/stairs_2_2_down_on --real_start_idx 321 --output_dir logs/0/visualizations_milestone_151/vis_synthetic
+# 力矩可视化
+python utils/visualize_synthetic_data.py --config configs/default_config.py --class_id 18 --synthetic_id 0 --synthetic_dir /datasets/denoising-diffusion-pytorch/logs/0/model-151/synthetic_data --visualize\
+ --participant BT12 --feature_indices 25,26,53,54 --real_data_path train/BT12/stairs_2_2_down_on --real_start_idx 312 --output_dir logs/0/visualizations_milestone_151/vis_synthetic
+

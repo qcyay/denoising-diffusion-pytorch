@@ -132,8 +132,8 @@ class DiffusionSequenceDataset(Dataset):
             'trials_with_any_nan_data': 0  # 包含任何NaN的试验数
         }
 
-        # # 测试,正式训练时该行需要注释
-        # self.trial_names = self.trial_names[:100]
+        # 测试,正式训练时该行需要注释
+        self.trial_names = self.trial_names[:100]
 
         # 序列长度过滤统计信息
         self.length_filter_stats = {
