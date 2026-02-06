@@ -1178,6 +1178,7 @@ class Trainer1D(object):
             save_and_sample_every=1000,
             num_samples=25,
             results_folder='./results',
+            log_file=None,
             amp=False,
             mixed_precision_type='fp16',
             split_batches=True,
@@ -1219,6 +1220,7 @@ class Trainer1D(object):
 
         # dataset and dataloader
 
+        self.dataset = dataset
         # 标准 DataLoader：shuffle 打乱，pin_memory 提升主机到 GPU 的拷贝效率
         dl = DataLoader(dataset, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=cpu_count())
 
@@ -1246,6 +1248,7 @@ class Trainer1D(object):
         # 创建结果保存目录
         self.results_folder = Path(results_folder)
         self.results_folder.mkdir(exist_ok=True)
+        self.log_file = log_file
 
         # step counter state
 
@@ -1355,6 +1358,11 @@ class Trainer1D(object):
 
                 # 更新 tqdm 进度条头部显示当前 loss
                 pbar.set_description(f'loss: {total_loss:.4f}')
+
+                # 写入损失到日志文件（不打印到屏幕）
+                if hasattr(self, 'log_file') and self.log_file is not None:
+                    with open(self.log_file, 'a', encoding='utf-8') as f:
+                        f.write(f"Step {self.step}: loss = {total_loss:.6f}\n")
 
                 # 等待所有进程同步，保证梯度等状态一致
                 accelerator.wait_for_everyone()

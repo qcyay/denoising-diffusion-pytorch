@@ -40,7 +40,6 @@ class DiffusionSequenceDataset(Dataset):
     - 支持参与者体重特征
     - 返回运动类型的类别标签
     '''
-
     def __init__(self,
                  data_dir: str,
                  input_names: List[str],
@@ -48,6 +47,7 @@ class DiffusionSequenceDataset(Dataset):
                  side: Union[str, List[str]],
                  diffusion_sequence_length: int,
                  action_patterns: List[str],
+                 selected_action_indices: List[int] = None,
                  participant_masses: Dict[str, float] = {},
                  mode: Union[str, List[str]] = "train",
                  file_suffix: Dict[str, str] = None,
@@ -97,6 +97,13 @@ class DiffusionSequenceDataset(Dataset):
         self.use_participant_mass = use_participant_mass
         self.min_sequence_length = min_sequence_length
 
+        # 根据selected_action_indices筛选类别
+        if selected_action_indices is not None and len(selected_action_indices) > 0:
+            self.action_patterns = [self.action_patterns[i] for i in selected_action_indices]
+            print(f"使用选定的 {len(self.action_patterns)} 个类别: {selected_action_indices}")
+        else:
+            print(f"使用所有 {len(self.action_patterns)} 个类别")
+
         # 归一化配置
         self.enable_normalization = enable_normalization
         self.feature_statistics_path = feature_statistics_path
@@ -132,8 +139,8 @@ class DiffusionSequenceDataset(Dataset):
             'trials_with_any_nan_data': 0  # 包含任何NaN的试验数
         }
 
-        # 测试,正式训练时该行需要注释
-        self.trial_names = self.trial_names[:100]
+        # # 测试,正式训练时该行需要注释
+        # self.trial_names = self.trial_names[:100]
 
         # 序列长度过滤统计信息
         self.length_filter_stats = {

@@ -63,7 +63,7 @@ label_names = ["hip_flexion_*_moment", "knee_angle_*_moment"]
 min_sequence_length = -1
 
 # 扩散模型的子序列长度（每个样本的时间步数）
-diffusion_sequence_length = 296
+diffusion_sequence_length = 512
 
 # 运动类型筛选模式（使用正则表达式）
 # 每个元素可以是单个pattern或多个patterns的列表，同一元素内的patterns属于同一类别
@@ -100,6 +100,12 @@ action_patterns = [
     [r"^step_ups_.*"],  # 类别27: Step up
 ]
 
+# ==================== 类别选择配置 ====================
+# 选择要使用的action_patterns类别索引
+# None 或 [] 表示使用所有类别
+# 例如 [0, 1, 2] 表示只使用前三个类别
+selected_action_indices = None  # 或 [0, 1, 2]
+
 # ==================== 归一化配置 ====================
 
 # 是否启用数据归一化
@@ -114,7 +120,7 @@ feature_statistics_path = os.path.join("data", "feature_statistics.json")
 #   'linear': 线性归一化 (x - min) / (max - min)
 #   'tanh': 基于tanh的S型归一化，两端变化慢，中间变化快
 #   'power': 幂函数归一化 ((x - min) / (max - min)) ** alpha
-normalization_method = 'tanh'
+normalization_method = 'linear'
 
 # 归一化方法的超参数
 normalization_params = {
@@ -152,13 +158,13 @@ ema_decay = 0.995
 ema_update_every = 10
 
 # 保存和采样间隔
-save_and_sample_every = 5000
+save_and_sample_every = 10
 
 # 采样数量
 num_samples = 50
 
 # 结果保存目录
-results_folder = './logs/0'
+results_folder = './logs/1'
 
 # 混合精度训练
 amp = False

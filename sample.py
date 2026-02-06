@@ -17,6 +17,8 @@ import torch
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
+import shutil
+from datetime import datetime
 
 # 设置 CUDA_VISIBLE_DEVICES 来指定可见的 GPU（例如 GPU 1 和 GPU 2）
 os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
@@ -27,6 +29,10 @@ def load_config(config_name):
 
     Args:
         config_name: 配置文件名或路径
+
+    Returns:
+        config: 配置模块
+        config_file_path: 配置文件的实际路径
     """
     # 支持两种格式：configs.default_config 或 configs/default_config.py
     if '/' in config_name or '\\' in config_name or config_name.endswith('.py'):
@@ -35,11 +41,55 @@ def load_config(config_name):
         spec = importlib.util.spec_from_file_location("config", filepath)
         config = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(config)
+        config_file_path = filepath
     else:
         # 模块名形式
         config = importlib.import_module(config_name)
+        # 获取模块文件路径
+        config_file_path = config.__file__
 
-    return config
+    return config, config_file_path
+
+
+def save_experiment_info(output_dir, config_file_path, command_line_args):
+    """
+    保存实验信息：配置文件和命令行参数
+
+    Args:
+        output_dir: 输出目录
+        config_file_path: 配置文件路径
+        command_line_args: 命令行参数字典
+    """
+    output_dir = Path(output_dir)
+
+    # 1. 复制配置文件到输出目录
+    if os.path.exists(config_file_path):
+        config_dest = output_dir / f"config_{Path(config_file_path).name}"
+        shutil.copy2(config_file_path, config_dest)
+        print(f"✓ 配置文件已保存: {config_dest}")
+    else:
+        print(f"⚠ 警告: 配置文件不存在，无法复制: {config_file_path}")
+
+    # 2. 保存命令行参数
+    cmd_file = output_dir / "generation_command.txt"
+    with open(cmd_file, 'w', encoding='utf-8') as f:
+        # 写入时间戳
+        f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 70 + "\n\n")
+
+        # 写入完整命令行
+        f.write("完整命令行:\n")
+        f.write("python " + " ".join(sys.argv) + "\n\n")
+        f.write("=" * 70 + "\n\n")
+
+        # 写入详细参数
+        f.write("命令行参数详情:\n")
+        for key, value in command_line_args.items():
+            f.write(f"  --{key}: {value}\n")
+
+        f.write("\n" + "=" * 70 + "\n")
+
+    print(f"✓ 命令行参数已保存: {cmd_file}")
 
 
 def generate_synthetic_data(
@@ -63,7 +113,7 @@ def generate_synthetic_data(
 
     # 1. 加载配置文件
     print(f"\n加载配置文件: {config_path}")
-    config = load_config(config_path)
+    config, config_file_path = load_config(config_path)
 
     # 2. 从config读取参数（如果命令行未提供）
     results_folder = Path(config.results_folder)
@@ -96,7 +146,21 @@ def generate_synthetic_data(
 
     print(f"\n模型路径: {model_path}")
 
-    # 2. 加载数据集（用于获取denormalize_data方法和特征名称）
+    # 4. 创建输出目录
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 5. 保存配置文件和命令行参数
+    print(f"\n保存实验信息...")
+    command_line_args = {
+        'config': config_path,
+        'milestone': milestone,
+        'output_dir': str(output_dir),
+        'device': device if device else 'from_config'
+    }
+    save_experiment_info(output_dir, config_file_path, command_line_args)
+
+    # 6. 加载数据集（用于获取denormalize_data方法和特征名称）
     print(f"\n创建数据集...")
     from dataset_loaders.sequence_dataloader import DiffusionSequenceDataset
 
@@ -107,6 +171,7 @@ def generate_synthetic_data(
         side=config.side,
         diffusion_sequence_length=config.diffusion_sequence_length,
         action_patterns=config.action_patterns,
+        selected_action_indices=config.selected_action_indices,
         participant_masses=getattr(config, 'participant_masses', {}),
         mode='train',
         remove_nan=getattr(config, 'remove_nan', False),
@@ -129,7 +194,7 @@ def generate_synthetic_data(
     feature_names = dataset._get_feature_names()
     print(f"  - 特征名称: {len(feature_names)} 个")
 
-    # 3. 创建模型和训练器
+    # 7. 创建模型和训练器
     print(f"\n创建训练器和加载模型...")
     from denoising_diffusion_pytorch.classifier_free_guidance_1d import Unet1D, GaussianDiffusion1D, Trainer1D
 
@@ -172,7 +237,7 @@ def generate_synthetic_data(
     trainer.load(milestone)
     print(f"✓ 模型加载完成 (milestone {milestone})")
 
-    # 4. 确定要生成的类别
+    # 8. 确定要生成的类别
     if classes_to_generate is None:
         classes_to_generate = list(range(len(config.action_patterns)))
 
@@ -182,11 +247,7 @@ def generate_synthetic_data(
     print(f"  - 批次大小: {batch_size}")
     print(f"  - 输出目录: {output_dir}")
 
-    # 5. 创建输出目录
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # 6. 为每个类别生成数据
+    # 9. 为每个类别生成数据
     print(f"\n开始生成仿真数据...")
     print("=" * 70)
 

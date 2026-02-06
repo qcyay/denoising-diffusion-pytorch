@@ -155,6 +155,7 @@ def main():
         side=config.side,
         diffusion_sequence_length=config.diffusion_sequence_length,
         action_patterns=config.action_patterns,
+        selected_action_indices=config.selected_action_indices,
         participant_masses=config.participant_masses,
         mode=config.mode,
         remove_nan=True,
@@ -233,6 +234,7 @@ def main():
         save_and_sample_every=config.save_and_sample_every,
         num_samples=config.num_samples,
         results_folder=config.results_folder,
+        log_file=log_file if is_main_process() else None,
         amp=config.amp
     )
 
