@@ -40,7 +40,7 @@ def example_1_generate_statistics():
     print("\n开始计算特征统计信息...")
     dataset.compute_and_save_statistics(output_dir='statistics')
 
-    print("\n✓ 统计文件已生成: statistics/feature_statistics.json")
+    print("\n✓ 统计文件已生成: statistics/feature_statistics_old.json")
     print("  现在可以启用归一化功能了")
 
 

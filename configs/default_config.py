@@ -113,7 +113,7 @@ enable_normalization = True
 
 # 特征统计文件路径（包含每个类别每个特征的最大最小值）
 # 该文件由 compute_and_save_statistics() 方法生成
-feature_statistics_path = os.path.join("data", "feature_statistics.json")
+feature_statistics_path = os.path.join("data", "feature_statistics_old.json")
 
 # 归一化方法选择
 # 可选值:

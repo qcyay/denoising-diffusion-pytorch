@@ -194,7 +194,140 @@ from denoising_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
 # full_attn = (*((False,) * (len(dim_mults) - 1)), True)
 # print(full_attn)
 
-a = torch.arange(10)
-b=torch.pow(a, 0.5)
-plt.plot(b)
-plt.show()
+def compute_and_save_statistics(self, output_dir: str = "statistics"):
+    """
+    计算并保存每个运动类别的特征统计信息（最大值和最小值）
+
+    参数:
+        output_dir: 统计信息保存目录
+
+    保存格式:
+    {
+        "class_0": {
+            "feature_name_1": {"max": xxx, "min": xxx},
+            "feature_name_2": {"max": xxx, "min": xxx},
+            ...
+        },
+        ...
+        "participant_mass": {"max": xxx, "min": xxx}
+    }
+    """
+    import json
+
+    print(f"\n{'=' * 60}")
+    print(f"开始计算特征统计信息...")
+    print(f"{'=' * 60}")
+
+    # 创建输出目录
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 获取特征名称列表
+    feature_names = self._get_feature_names()
+    num_features = len(feature_names)
+
+    # 初始化统计字典：每个类别存储每个特征的最大值和最小值
+    # {class_idx: {feature_name: {"max": [], "min": []}}}
+    class_stats = {}
+    for class_idx in range(len(self.action_patterns)):
+        class_stats[class_idx] = {}
+        for feat_name in feature_names:
+            class_stats[class_idx][feat_name] = {
+                "max": float('-inf'),
+                "min": float('inf')
+            }
+
+    # 参与者体重统计（如果启用）
+    mass_stats = None
+    if self.use_participant_mass and self.participant_masses:
+        # 直接从participant_masses字典中获取最大最小值
+        mass_values = list(self.participant_masses.values())
+        mass_stats = {
+            "max": max(mass_values),
+            "min": min(mass_values)
+        }
+
+    # 遍历所有试验，按类别收集统计信息
+    print(f"正在处理 {len(self.all_data)} 个试验...")
+
+    for trial_idx in tqdm(range(len(self.all_data)),
+                          desc="计算特征统计",
+                          unit="trial",
+                          ncols=80):
+        data = self.all_data[trial_idx]  # shape: [num_features, seq_len]
+        class_label = self.all_labels[trial_idx]
+
+        if class_label == -1:
+            # 跳过未知类别
+            continue
+
+        # 对每个特征维度计算统计信息
+        for feat_idx in range(num_features):
+            feat_data = data[feat_idx, :]  # 该特征的所有时间步数据
+            feat_name = feature_names[feat_idx]
+
+            # 更新该类别该特征的最大值和最小值
+            feat_max = np.max(feat_data)
+            feat_min = np.min(feat_data)
+
+            class_stats[class_label][feat_name]["max"] = max(
+                class_stats[class_label][feat_name]["max"],
+                feat_max
+            )
+            class_stats[class_label][feat_name]["min"] = min(
+                class_stats[class_label][feat_name]["min"],
+                feat_min
+            )
+
+    # 构建最终的统计字典
+    final_stats = {}
+
+    # 添加每个类别的统计信息
+    for class_idx in range(len(self.action_patterns)):
+        class_key = f"class_{class_idx}"
+
+        # 只保存有数据的类别
+        has_data = any(
+            class_stats[class_idx][feat_name]["max"] != float('-inf')
+            for feat_name in feature_names
+        )
+
+        if has_data:
+            final_stats[class_key] = {}
+            for feat_name in feature_names:
+                # 只保存有有效值的特征
+                if class_stats[class_idx][feat_name]["max"] != float('-inf'):
+                    final_stats[class_key][feat_name] = {
+                        "max": float(class_stats[class_idx][feat_name]["max"]),
+                        "min": float(class_stats[class_idx][feat_name]["min"])
+                    }
+
+    # 添加参与者体重的全局统计（如果启用）
+    if self.use_participant_mass and mass_stats is not None:
+        final_stats["participant_mass"] = {
+            "max": float(mass_stats["max"]),
+            "min": float(mass_stats["min"])
+        }
+
+    # 保存到文件
+    output_file = os.path.join(output_dir, "feature_statistics_old.json")
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(final_stats, f, indent=2, ensure_ascii=False)
+
+    print(f"统计信息已保存到: {output_file}")
+    print(f"包含 {len([k for k in final_stats.keys() if k.startswith('class_')])} 个类别的统计信息")
+    print(f"每个类别包含 {num_features} 个特征")
+
+    # 打印示例统计信息
+    if len(final_stats) > 0:
+        print(f"\n示例统计信息 (class_0 的前3个特征):")
+        if "class_0" in final_stats:
+            count = 0
+            for feat_name, stats in final_stats["class_0"].items():
+                print(f"  {feat_name}: max={stats['max']:.4f}, min={stats['min']:.4f}")
+                count += 1
+                if count >= 3:
+                    break
+
+    print(f"{'=' * 60}\n")
+
+    return final_stats

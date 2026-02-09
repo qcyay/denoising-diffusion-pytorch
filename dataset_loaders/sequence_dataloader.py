@@ -632,27 +632,45 @@ class DiffusionSequenceDataset(Dataset):
         return mass_feature
 
     def _generate_sequences(self) -> List[Tuple[int, int]]:
-        '''
-        生成所有可用的序列索引
-        返回: [(trial_idx, start_idx), ...]
-        '''
+        """
+        生成所有试验的子序列索引
+
+        Returns:
+            sequences: 子序列列表，每个元素为 (trial_idx, start_idx)
+        """
         sequences = []
+        total_trials = len(self.trial_names)
+        print_interval = max(1, total_trials // 10)  # 每处理10%打印一次
 
         for trial_idx in range(len(self.trial_names)):
-            # 获取该试验的数据长度
-            data_len = self.all_data[trial_idx].shape[1]
+            # 打印进度
+            if (trial_idx + 1) % print_interval == 0 or (trial_idx + 1) == total_trials:
+                print_rank_0(f"  进度: {trial_idx + 1}/{total_trials} ({(trial_idx + 1) / total_trials * 100:.1f}%)")
 
-            # 检查数据长度是否足够
-            if data_len < self.diffusion_sequence_length:
+            data = self.all_data[trial_idx]
+            data_len = data.shape[1]
+
+            # 计算可以生成的最大起始索引
+            max_start_idx = data_len - self.diffusion_sequence_length
+
+            if max_start_idx < 0:
                 print_rank_0(f"警告: 试验 {self.trial_names[trial_idx]} 数据长度不足 "
                              f"(需要{self.diffusion_sequence_length}, 实际{data_len})，跳过")
                 continue
 
-            # 生成所有有效的起始索引
-            max_start_idx = data_len - self.diffusion_sequence_length
-
+            # 生成所有可能的子序列
             for start_idx in range(max_start_idx + 1):
+                # 如果不移除NaN，需要检查当前子序列是否包含NaN
+                if not self.remove_any_nan:
+                    subsequence = data[:, start_idx:start_idx + self.diffusion_sequence_length]
+
+                    # 检查子序列中是否包含NaN
+                    if np.isnan(subsequence).any():
+                        continue  # 跳过包含NaN的子序列
+
                 sequences.append((trial_idx, start_idx))
+
+        print_rank_0(f"✓ 子序列生成完成，共 {len(sequences)} 个")
 
         return sequences
 
@@ -839,36 +857,28 @@ class DiffusionSequenceDataset(Dataset):
 
     def compute_and_save_statistics(self, output_dir: str = "statistics"):
         """
-        计算并保存每个运动类别的特征统计信息（最大值和最小值）
+        计算并保存每个类别每个特征的最大最小值统计信息(只统计非NaN值)
 
         参数:
             output_dir: 统计信息保存目录
-
-        保存格式:
-        {
-            "class_0": {
-                "feature_name_1": {"max": xxx, "min": xxx},
-                "feature_name_2": {"max": xxx, "min": xxx},
-                ...
-            },
-            ...
-            "participant_mass": {"max": xxx, "min": xxx}
-        }
         """
         import json
 
+        os.makedirs(output_dir, exist_ok=True)
+
         print(f"\n{'=' * 60}")
         print(f"开始计算特征统计信息...")
-        print(f"{'=' * 60}")
-
-        # 创建输出目录
-        os.makedirs(output_dir, exist_ok=True)
+        print(f"统计信息将保存到: {output_dir}")
+        print(f"{'=' * 60}\n")
 
         # 获取特征名称列表
         feature_names = self._get_feature_names()
         num_features = len(feature_names)
 
-        # 初始化统计字典：每个类别存储每个特征的最大值和最小值
+        print(f"总特征数: {num_features}")
+        print(f"类别数: {len(self.action_patterns)}")
+
+        # 初始化统计字典结构
         # {class_idx: {feature_name: {"max": [], "min": []}}}
         class_stats = {}
         for class_idx in range(len(self.action_patterns)):
@@ -908,9 +918,16 @@ class DiffusionSequenceDataset(Dataset):
                 feat_data = data[feat_idx, :]  # 该特征的所有时间步数据
                 feat_name = feature_names[feat_idx]
 
+                # 只保留非NaN的数据
+                valid_data = feat_data[~np.isnan(feat_data)]
+
+                # 如果该特征全为NaN，跳过统计
+                if len(valid_data) == 0:
+                    continue
+
                 # 更新该类别该特征的最大值和最小值
-                feat_max = np.max(feat_data)
-                feat_min = np.min(feat_data)
+                feat_max = np.max(valid_data)
+                feat_min = np.min(valid_data)
 
                 class_stats[class_label][feat_name]["max"] = max(
                     class_stats[class_label][feat_name]["max"],
@@ -975,7 +992,6 @@ class DiffusionSequenceDataset(Dataset):
 
         return final_stats
 
-
 def main():
     import importlib
     import sys
@@ -994,7 +1010,7 @@ def main():
                         help="设备，如 cpu 或 cuda:0")
     parser.add_argument("--compute_stats", action="store_true",
                         help="是否计算并保存特征统计信息")
-    parser.add_argument("--stats_dir", type=str, default="statistics",
+    parser.add_argument("--stats_dir", type=str, default="data",
                         help="统计信息保存目录")
 
     args = parser.parse_args()
@@ -1026,11 +1042,12 @@ def main():
         participant_masses=config.participant_masses,
         mode=mode,
         remove_nan=True,
-        remove_any_nan=True,
+        remove_any_nan=False,
         activity_flag=config.activity_flag,
         use_participant_mass=getattr(config, 'use_participant_mass', False),
         min_sequence_length=getattr(config, 'min_sequence_length', -1),
-        enable_normalization=getattr(config, 'enable_normalization', True),
+        enable_normalization=False,
+        # enable_normalization=getattr(config, 'enable_normalization', True),
         feature_statistics_path=getattr(config, 'feature_statistics_path', None),
         normalization_method=getattr(config, 'normalization_method', 'linear'),
         normalization_params=getattr(config, 'normalization_params', None)
