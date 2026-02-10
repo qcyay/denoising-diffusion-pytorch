@@ -21,10 +21,6 @@ from dataset_loaders.sequence_dataloader import print_rank_0
 from dataset_loaders.sequence_dataloader import DiffusionSequenceDataset
 from denoising_diffusion_pytorch.classifier_free_guidance_1d import Unet1D, GaussianDiffusion1D, Trainer1D
 
-# 设置 CUDA_VISIBLE_DEVICES 来指定可见的 GPU（例如 GPU 1 和 GPU 2）
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
-
-
 def get_rank():
     """获取当前进程的rank，支持Accelerate和PyTorch原生分布式训练"""
     # 方法1: 检查Accelerate环境变量（优先级最高）
@@ -98,12 +94,16 @@ def main():
     parser = argparse.ArgumentParser(description='训练扩散模型')
     parser.add_argument('--config', type=str, default='default_config',
                         help='配置文件模块名 (default: default_config)')
-    parser.add_argument('--device', type=str, default='cuda:0',
-                        help='训练设备 (default: cuda:0)')
+    parser.add_argument('--device', type=str, default='0,1',
+                        help='使用的GPU编号，用逗号分隔 (default: 0,1)')
     parser.add_argument('--resume', type=str, default=None,
                         help='从检查点恢复训练，指定milestone编号 (例如: 100)')
 
     args = parser.parse_args()
+
+    # 设置可见的GPU
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.device
+    print(f"设置 CUDA_VISIBLE_DEVICES = {args.device}")
 
     # ==================== 加载配置文件 ====================
     print_rank_0("=" * 70)
@@ -158,8 +158,8 @@ def main():
         selected_action_indices=config.selected_action_indices,
         participant_masses=config.participant_masses,
         mode=config.mode,
-        remove_nan=True,
-        remove_any_nan=True,
+        remove_nan=getattr(config, 'remove_nan', True),
+        remove_any_nan=getattr(config, 'remove_any_nan', False),
         activity_flag=config.activity_flag,
         use_participant_mass=config.use_participant_mass,
         min_sequence_length=getattr(config, 'min_sequence_length', -1),

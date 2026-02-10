@@ -106,6 +106,14 @@ action_patterns = [
 # 例如 [0, 1, 2] 表示只使用前三个类别
 selected_action_indices = None  # 或 [0, 1, 2]
 
+# ==================== NaN 处理配置 ====================
+
+# 是否移除“全为 NaN”的试验
+remove_nan = True
+
+# 是否移除“包含任意 NaN”的试验 / 子序列
+remove_any_nan = False
+
 # ==================== 归一化配置 ====================
 
 # 是否启用数据归一化
@@ -113,14 +121,14 @@ enable_normalization = True
 
 # 特征统计文件路径（包含每个类别每个特征的最大最小值）
 # 该文件由 compute_and_save_statistics() 方法生成
-feature_statistics_path = os.path.join("data", "feature_statistics_old.json")
+feature_statistics_path = os.path.join("data", "feature_statistics.json")
 
 # 归一化方法选择
 # 可选值:
 #   'linear': 线性归一化 (x - min) / (max - min)
 #   'tanh': 基于tanh的S型归一化，两端变化慢，中间变化快
 #   'power': 幂函数归一化 ((x - min) / (max - min)) ** alpha
-normalization_method = 'linear'
+normalization_method = 'tanh'
 
 # 归一化方法的超参数
 normalization_params = {
